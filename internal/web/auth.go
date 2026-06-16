@@ -19,6 +19,7 @@ const sessionCookieName = "emby_migrator_session"
 type authStatusResponse struct {
 	Enabled       bool   `json:"enabled"`
 	Authenticated bool   `json:"authenticated"`
+	ToolVersion   string `json:"toolVersion"`
 	Warning       string `json:"warning,omitempty"`
 }
 
@@ -46,6 +47,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, authStatusResponse{
 			Enabled:       false,
 			Authenticated: true,
+			ToolVersion:   s.cfg.Version,
 			Warning:       "未设置 EMBY_MIGRATOR_PASSWORD，当前 Web 页面未启用登录保护。",
 		})
 		return
@@ -53,12 +55,13 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, authStatusResponse{
 		Enabled:       true,
 		Authenticated: s.validSession(r),
+		ToolVersion:   s.cfg.Version,
 	})
 }
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.authEnabled() {
-		writeJSON(w, http.StatusOK, authStatusResponse{Enabled: false, Authenticated: true})
+		writeJSON(w, http.StatusOK, authStatusResponse{Enabled: false, Authenticated: true, ToolVersion: s.cfg.Version})
 		return
 	}
 	var req loginRequest
@@ -72,7 +75,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, s.sessionCookie(r, s.newSessionToken()))
-	writeJSON(w, http.StatusOK, authStatusResponse{Enabled: true, Authenticated: true})
+	writeJSON(w, http.StatusOK, authStatusResponse{Enabled: true, Authenticated: true, ToolVersion: s.cfg.Version})
 }
 
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {

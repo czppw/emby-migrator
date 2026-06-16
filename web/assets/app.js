@@ -82,6 +82,7 @@
       "authLoginBtn",
       "authNotice",
       "authWarning",
+      "appVersion",
       "logoutBtn",
       "themeToggleBtn",
       "serverUrl",
@@ -191,6 +192,7 @@
       const data = await fetchJson("/api/auth/status", { skipAuthRedirect: true });
       state.authEnabled = Boolean(data.enabled);
       state.authenticated = Boolean(data.authenticated);
+      setAppVersion(readFirst(data, ["toolVersion", "ToolVersion", "version", "Version"]));
       applyAuthState(data.warning || "");
     } catch (error) {
       state.authEnabled = true;
@@ -290,6 +292,7 @@
         readFirst(data, ["serverName", "name", "Name"]) ||
         readFirst(server, ["serverName", "ServerName", "name", "Name"]);
       const label = [name, version ? `v${version}` : ""].filter(Boolean).join(" ");
+      setAppVersion(readFirst(data, ["toolVersion", "ToolVersion"]));
 
       state.connected = true;
       window.localStorage.setItem("embyMigrator.serverUrl", connection.serverUrl);
@@ -952,6 +955,15 @@
       els.connectionDot.classList.add(status);
     }
     els.connectionText.textContent = text;
+  }
+
+  function setAppVersion(version) {
+    if (!els.appVersion) {
+      return;
+    }
+    const normalized = String(version || "").trim();
+    els.appVersion.textContent = normalized ? `v${normalized}` : "";
+    els.appVersion.classList.toggle("is-hidden", !normalized);
   }
 
   function setButtonBusy(key, button, busy, busyText) {
