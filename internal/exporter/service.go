@@ -1158,6 +1158,9 @@ func minimalMetadataPayload(raw map[string]any) map[string]any {
 	if _, ok := out["Source"]; !ok {
 		out["Source"] = "Unknown"
 	}
+	if _, ok := out["ProviderIds"]; !ok {
+		out["ProviderIds"] = map[string]string{}
+	}
 	return out
 }
 
@@ -1294,6 +1297,8 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 		payload["ProviderIds"] = source.ProviderIDs
 	} else if len(current.ProviderIDs) > 0 {
 		payload["ProviderIds"] = current.ProviderIDs
+	} else {
+		payload["ProviderIds"] = map[string]string{}
 	}
 	current.Raw = payload
 }
@@ -1431,15 +1436,25 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 			firstAmbiguous = items
 		}
 	}
-	if stem := mediaPathStem(entry.Path); stem != "" && entry.Type != "Season" {
+	if stem := mediaPathStem(entry.Path); stem != "" {
 		items, err := client.SearchItems(ctx, searchPrefix(stem, 30), entry.Type, 50)
 		if err == nil {
-			matches := mediaStemMatches(stem, entry.Type, items)
-			if len(matches) == 1 {
-				return matches[0], matches, "media-file", nil
-			}
-			if len(matches) > 1 {
-				rememberAmbiguous("media-file-ambiguous", matches)
+			if entry.Type == "Season" {
+				matches := seasonMatches(entry, items)
+				if len(matches) == 1 {
+					return matches[0], matches, "season-parent", nil
+				}
+				if len(matches) > 1 {
+					rememberAmbiguous("season-parent-ambiguous", matches)
+				}
+			} else {
+				matches := mediaStemMatches(stem, entry.Type, items)
+				if len(matches) == 1 {
+					return matches[0], matches, "media-file", nil
+				}
+				if len(matches) > 1 {
+					rememberAmbiguous("media-file-ambiguous", matches)
+				}
 			}
 		} else {
 			rememberSearchErr(err)
@@ -1473,9 +1488,13 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 			rememberSearchErr(err)
 		}
 	}
-	if entry.Type == "Season" && strings.TrimSpace(entry.Name) != "" {
-		items, err := client.SearchItems(ctx, entry.Name, "Season", 300)
-		if err == nil {
+	if entry.Type == "Season" {
+		for _, term := range seasonSearchTerms(entry) {
+			items, err := client.SearchItems(ctx, term, "Season", 300)
+			if err != nil {
+				rememberSearchErr(err)
+				continue
+			}
 			matches := seasonMatches(entry, items)
 			if len(matches) == 1 {
 				return matches[0], matches, "season-parent", nil
@@ -1483,8 +1502,6 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 			if len(matches) > 1 {
 				rememberAmbiguous("season-parent-ambiguous", matches)
 			}
-		} else {
-			rememberSearchErr(err)
 		}
 	}
 	if strings.TrimSpace(entry.Name) != "" {
@@ -1623,6 +1640,28 @@ func seasonMatches(entry storage.ItemEntry, items []emby.Item) []emby.Item {
 		matches = append(matches, item)
 	}
 	return matches
+}
+
+func seasonSearchTerms(entry storage.ItemEntry) []string {
+	terms := make([]string, 0, 3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range terms {
+			if strings.EqualFold(existing, value) {
+				return
+			}
+		}
+		terms = append(terms, value)
+	}
+	add(entry.Name)
+	if season, ok := seasonNumberFromEntry(entry); ok {
+		add(fmt.Sprintf("Season %d", season))
+		add(fmt.Sprintf("第 %d 季", season))
+	}
+	return terms
 }
 
 func episodeNumberFromEntry(entry storage.ItemEntry) (episodeNumber, bool) {
