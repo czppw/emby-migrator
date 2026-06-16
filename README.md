@@ -66,27 +66,6 @@ services:
     restart: unless-stopped
 ```
 
-## GitHub 自动发布到 Docker Hub
-
-仓库已包含 `.github/workflows/dockerhub.yml`。推送到 `main` 或推送 `v*` 标签时，会自动构建并推送：
-
-- `czppwa/emby-migrator:latest`
-- `czppwa/emby-migrator:vX.Y.Z`
-- `czppwa/emby-migrator:sha-xxxxxxx`
-
-在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 添加：
-
-- `DOCKERHUB_USERNAME`：Docker Hub 用户名
-- `DOCKERHUB_TOKEN`：Docker Hub Access Token
-
-未配置这两个 secrets 时，GitHub Actions 会跳过镜像推送，不会把 workflow 标红。
-
-Docker Hub 里建议提前创建仓库：
-
-```text
-czppwa/emby-migrator
-```
-
 ## 连接 Emby 注意事项
 
 容器内的 `localhost` 指容器自身。访问宿主机 Emby 时：
