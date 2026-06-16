@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Emby Migrator</title>
+    <link rel="stylesheet" href="./assets/styles.css" />
+    <script src="./assets/app.js" defer></script>
+  </head>
+  <body>
+    <section class="auth-gate is-hidden" id="authGate" aria-labelledby="authTitle">
+      <form class="auth-card" id="authForm">
+        <p class="eyebrow">Protected Access</p>
+        <h2 id="authTitle">登录 Emby Migrator</h2>
+        <label class="field">
+          <span>访问密码</span>
+          <input
+            id="authPassword"
+            name="authPassword"
+            type="password"
+            autocomplete="current-password"
+            placeholder="默认 password"
+            required
+          />
+        </label>
+        <button type="submit" class="button primary" id="authLoginBtn">登录</button>
+        <div class="notice" id="authNotice" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <div class="app-shell" id="appShell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Docker Web Tool</p>
+          <h1>Emby Migrator</h1>
+        </div>
+        <div class="header-actions">
+          <div class="header-status" aria-live="polite">
+            <span class="status-dot" id="connectionDot"></span>
+            <span id="connectionText">未连接</span>
+          </div>
+          <button type="button" class="button small ghost" id="themeToggleBtn" aria-pressed="false">
+            暗黑
+          </button>
+          <button type="button" class="button small ghost is-hidden" id="logoutBtn">退出</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="notice warning is-hidden span-all" id="authWarning" role="status"></section>
+
+        <section class="panel connection-panel" aria-labelledby="connectionTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="connectionTitle">连接设置</h2>
+              <p>填写 Emby Server 地址和 API Key，用于读取媒体库、导出和导入验证。</p>
+            </div>
+          </div>
+
+          <form id="connectionForm" class="form-grid">
+            <label class="field span-2">
+              <span>Emby 地址</span>
+              <input
+                id="serverUrl"
+                name="serverUrl"
+                type="url"
+                inputmode="url"
+                autocomplete="url"
+                placeholder="http://192.168.1.10:8096"
+                required
+              />
+            </label>
+
+            <label class="field span-2">
+              <span>API Key</span>
+              <input
+                id="apiKey"
+                name="apiKey"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="输入 Emby API Key"
+                required
+              />
+            </label>
+
+            <div class="actions span-2">
+              <button type="submit" class="button primary" id="testConnectionBtn">
+                测试连接
+              </button>
+              <button type="button" class="button" id="loadLibrariesBtn" disabled>
+                读取媒体库
+              </button>
+            </div>
+          </form>
+
+          <div class="notice" id="connectionNotice" role="status" aria-live="polite">
+            等待连接测试。
+          </div>
+        </section>
+
+        <section class="panel libraries-panel" aria-labelledby="librariesTitle">
+          <div class="panel-heading with-action">
+            <div>
+              <h2 id="librariesTitle">媒体库</h2>
+              <p id="librarySummary">连接成功后读取媒体库列表。</p>
+            </div>
+            <button type="button" class="button small" id="refreshLibrariesBtn" disabled>
+              刷新
+            </button>
+          </div>
+
+          <div class="library-toolbar">
+            <label class="checkline">
+              <input type="checkbox" id="selectAllLibraries" disabled />
+              <span>全选</span>
+            </label>
+            <span id="selectedCount">已选 0 个</span>
+          </div>
+
+          <div class="library-list" id="libraryList" aria-live="polite">
+            <div class="empty-state">暂无媒体库。请先测试连接并读取列表。</div>
+          </div>
+        </section>
+
+        <section class="panel export-panel" aria-labelledby="exportTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="exportTitle">导出任务</h2>
+              <p>选择媒体库和导出策略后启动任务，日志会通过 SSE 实时输出。</p>
+            </div>
+          </div>
+
+          <fieldset class="option-grid">
+            <legend>导出选项</legend>
+            <label class="option">
+              <input type="checkbox" id="exportMetadata" checked disabled />
+              <span>
+                <strong>元数据</strong>
+                <small class="option-code">metadata</small>
+                <small>始终导出完整元数据、info.json、raw.json 和 manifest。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="exportSkipImages" />
+              <span>
+                <strong>跳过图片</strong>
+                <small class="option-code">skipImages</small>
+                <small>只导出元数据，跳过图片下载。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="exportIncremental" checked />
+              <span>
+                <strong>增量导出</strong>
+                <small class="option-code">incremental</small>
+                <small>优先增量处理，减少重复导出。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="exportOverwrite" />
+              <span>
+                <strong>覆盖文件</strong>
+                <small class="option-code">overwrite</small>
+                <small>允许覆盖已有导出文件。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="exportIncludePeopleImages" checked />
+              <span>
+                <strong>人物头像</strong>
+                <small class="option-code">includePeopleImages</small>
+                <small>导出演员、导演等人物头像。</small>
+              </span>
+            </label>
+          </fieldset>
+
+          <fieldset class="image-type-panel">
+            <legend>导出图片类型</legend>
+            <div class="image-type-grid" id="exportImageTypes"></div>
+          </fieldset>
+
+          <fieldset class="performance-panel">
+            <legend>执行性能</legend>
+            <label class="field compact-field">
+              <span>并发数</span>
+              <input id="exportConcurrency" type="number" min="1" step="1" value="4" />
+            </label>
+          </fieldset>
+
+          <div class="actions task-actions">
+            <button type="button" class="button primary" id="startExportBtn" disabled>
+              开始导出
+            </button>
+          </div>
+        </section>
+
+        <section class="panel import-panel" aria-labelledby="importTitle">
+          <div class="panel-heading with-action">
+            <div>
+              <h2 id="importTitle">导入验证</h2>
+              <p>选择已有导出包或手动输入目录，用 dry-run 验证迁移适配性。</p>
+            </div>
+            <button type="button" class="button small" id="refreshExportsBtn">
+              刷新导出包
+            </button>
+          </div>
+
+          <div class="form-grid">
+            <label class="field span-2">
+              <span>已发现导出包</span>
+              <select id="exportsSelect">
+                <option value="">手动输入或先刷新导出包</option>
+              </select>
+            </label>
+
+            <label class="field span-2">
+              <span>导出包目录名或路径</span>
+              <input
+                id="importPath"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="例如 2026-06-16_120000 或 /data/exports/2026-06-16_120000"
+              />
+            </label>
+          </div>
+
+          <fieldset class="option-grid import-options">
+            <legend>导入选项</legend>
+            <label class="option">
+              <input type="checkbox" id="importMetadata" checked disabled />
+              <span>
+                <strong>元数据</strong>
+                <small class="option-code">metadata</small>
+                <small>始终读取导出包中的元数据并参与匹配/写入。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="importDryRun" checked />
+              <span>
+                <strong>仅验证</strong>
+                <small class="option-code">dry-run</small>
+                <small>只匹配并生成报告，不写入 Emby。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="importSkipImages" />
+              <span>
+                <strong>跳过图片</strong>
+                <small class="option-code">skipImages</small>
+                <small>导入时跳过图片上传。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="importOverwrite" />
+              <span>
+                <strong>覆盖目标</strong>
+                <small class="option-code">overwrite</small>
+                <small>允许覆盖目标库已有元数据或图片。</small>
+              </span>
+            </label>
+            <label class="option">
+              <input type="checkbox" id="importIncludePeopleImages" checked />
+              <span>
+                <strong>人物头像</strong>
+                <small class="option-code">includePeopleImages</small>
+                <small>导入演员、导演等人物头像。</small>
+              </span>
+            </label>
+          </fieldset>
+
+          <fieldset class="image-type-panel">
+            <legend>导入图片类型</legend>
+            <div class="image-type-grid" id="importImageTypes"></div>
+          </fieldset>
+
+          <fieldset class="performance-panel">
+            <legend>执行性能</legend>
+            <label class="field compact-field">
+              <span>并发数</span>
+              <input id="importConcurrency" type="number" min="1" step="1" value="4" />
+            </label>
+          </fieldset>
+
+          <div class="actions task-actions">
+            <button type="button" class="button primary" id="startImportBtn" disabled>
+              开始导入
+            </button>
+          </div>
+
+          <div class="notice" id="importNotice" role="status" aria-live="polite">
+            可先刷新导出包列表，也可以直接输入目录名或路径。
+          </div>
+        </section>
+
+        <section class="panel status-panel" aria-labelledby="statusTitle">
+          <div class="panel-heading with-action">
+            <div>
+              <h2 id="statusTitle">任务状态</h2>
+              <p>导出和导入任务共用状态展示与日志流。</p>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button small" id="refreshJobBtn" disabled>
+                刷新状态
+              </button>
+              <button type="button" class="button small danger" id="stopJobBtn" disabled>
+                中止任务
+              </button>
+            </div>
+          </div>
+
+          <div class="job-status" id="jobStatus" aria-live="polite">
+            <div>
+              <span class="label">任务类型</span>
+              <strong id="jobKind">-</strong>
+            </div>
+            <div>
+              <span class="label">任务状态</span>
+              <strong id="jobState">未开始</strong>
+            </div>
+            <div>
+              <span class="label">任务 ID</span>
+              <strong id="jobId">-</strong>
+            </div>
+            <div>
+              <span class="label">进度</span>
+              <strong id="jobProgress">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel logs-panel" aria-labelledby="logsTitle">
+          <div class="panel-heading with-action">
+            <div>
+              <h2 id="logsTitle">实时日志</h2>
+              <p id="logSummary">导出或导入任务启动后自动连接日志流。</p>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button small" id="downloadLogsBtn" disabled>下载</button>
+              <button type="button" class="button small" id="copyLogsBtn">复制</button>
+              <button type="button" class="button small" id="clearLogsBtn">清空</button>
+            </div>
+          </div>
+          <pre class="log-window" id="logWindow" aria-live="polite"></pre>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

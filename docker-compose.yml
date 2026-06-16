@@ -1,0 +1,14 @@
+services:
+  emby-migrator:
+    image: ${EMBY_MIGRATOR_IMAGE:-emby-migrator:local}
+    build: .
+    container_name: emby-migrator
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: Asia/Shanghai
+      EMBY_MIGRATOR_PASSWORD: password
+    volumes:
+      - ${EMBY_MIGRATOR_DATA_DIR:-/opt/emby-migrator/data}:/data
+      - ${EMBY_MIGRATOR_CONFIG_DIR:-/opt/emby-migrator/config}:/config
+    restart: unless-stopped

@@ -1,0 +1,7 @@
+/data/
+/config/
+*.log
+*.tmp
+*.exe
+server.exe*
+PROJECT_NOTES.md

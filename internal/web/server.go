@@ -1,0 +1,313 @@
+package web
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"emby-migrator/internal/config"
+	"emby-migrator/internal/emby"
+	"emby-migrator/internal/exporter"
+	"emby-migrator/internal/job"
+)
+
+type Server struct {
+	cfg           config.Config
+	jobs          *job.Manager
+	exporter      *exporter.Service
+	sessionSecret []byte
+}
+
+type connectionRequest struct {
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+}
+
+type connectionResponse struct {
+	OK          bool            `json:"ok"`
+	Server      emby.SystemInfo `json:"server"`
+	MaskedKey   string          `json:"maskedKey"`
+	ToolVersion string          `json:"toolVersion"`
+}
+
+type librariesRequest struct {
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+}
+
+type exportRequest struct {
+	BaseURL             string         `json:"baseUrl"`
+	APIKey              string         `json:"apiKey"`
+	Libraries           []emby.Library `json:"libraries"`
+	LibraryIDs          []string       `json:"libraryIds"`
+	Concurrency         int            `json:"concurrency"`
+	SkipImages          bool           `json:"skipImages"`
+	IncludePeopleImages bool           `json:"includePeopleImages"`
+	Incremental         bool           `json:"incremental"`
+	Overwrite           bool           `json:"overwrite"`
+	ImageTypes          []string       `json:"imageTypes"`
+}
+
+type importRequest struct {
+	BaseURL             string   `json:"baseUrl"`
+	APIKey              string   `json:"apiKey"`
+	ExportPath          string   `json:"exportPath"`
+	Concurrency         int      `json:"concurrency"`
+	DryRun              bool     `json:"dryRun"`
+	SkipImages          bool     `json:"skipImages"`
+	IncludePeopleImages bool     `json:"includePeopleImages"`
+	Overwrite           bool     `json:"overwrite"`
+	ImageTypes          []string `json:"imageTypes"`
+}
+
+func NewServer(cfg config.Config, jobs *job.Manager, exporter *exporter.Service) *Server {
+	return &Server{cfg: cfg, jobs: jobs, exporter: exporter, sessionSecret: makeSessionSecret(cfg.SessionSecret)}
+}
+
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	mux.Handle("POST /api/connection/test", s.requireAuth(http.HandlerFunc(s.handleConnectionTest)))
+	mux.Handle("POST /api/libraries", s.requireAuth(http.HandlerFunc(s.handleLibraries)))
+	mux.Handle("GET /api/exports", s.requireAuth(http.HandlerFunc(s.handleExports)))
+	mux.Handle("POST /api/jobs/export", s.requireAuth(http.HandlerFunc(s.handleExportJob)))
+	mux.Handle("POST /api/jobs/import", s.requireAuth(http.HandlerFunc(s.handleImportJob)))
+	mux.Handle("GET /api/jobs/{id}", s.requireAuth(http.HandlerFunc(s.handleJob)))
+	mux.Handle("POST /api/jobs/{id}/stop", s.requireAuth(http.HandlerFunc(s.handleStopJob)))
+	mux.Handle("GET /api/jobs/{id}/logs", s.requireAuth(http.HandlerFunc(s.handleJobLogs)))
+	mux.Handle("GET /api/jobs/{id}/logs.txt", s.requireAuth(http.HandlerFunc(s.handleJobLogDownload)))
+	mux.Handle("/", http.FileServer(http.Dir("web")))
+	return recoverJSON(mux)
+}
+
+func (s *Server) handleConnectionTest(w http.ResponseWriter, r *http.Request) {
+	var req connectionRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	client, err := emby.NewClient(req.BaseURL, req.APIKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	info, err := client.SystemInfo(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, connectionResponse{OK: true, Server: info, MaskedKey: emby.MaskAPIKey(req.APIKey), ToolVersion: s.cfg.Version})
+}
+
+func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
+	var req librariesRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	client, err := emby.NewClient(req.BaseURL, req.APIKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	libraries, err := client.Libraries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"libraries": libraries})
+}
+
+func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
+	exports, err := s.exporter.ListExports()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"exports": exports})
+}
+
+func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
+	var req exportRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	j := s.jobs.Create("export")
+	go func() {
+		j.Start()
+		j.Log("info", "开始导出任务")
+		result, err := s.exporter.Export(j.Context(), j, exporter.ExportRequest{
+			Connection:          emby.Connection{BaseURL: req.BaseURL, APIKey: req.APIKey},
+			Libraries:           req.Libraries,
+			LibraryIDs:          req.LibraryIDs,
+			Concurrency:         req.Concurrency,
+			SkipImages:          req.SkipImages,
+			IncludePeopleImages: req.IncludePeopleImages,
+			Incremental:         req.Incremental,
+			Overwrite:           req.Overwrite,
+			ImageTypes:          req.ImageTypes,
+			ToolVersion:         s.cfg.Version,
+		})
+		if err != nil {
+			j.Fail(err)
+			return
+		}
+		if len(result.Manifest.Errors) > 0 {
+			j.FailWithResult(
+				fmt.Errorf("导出未完全成功：%d 个错误，导出包已保留：%s", len(result.Manifest.Errors), result.Path),
+				result,
+			)
+			return
+		}
+		j.Complete(result)
+	}()
+	writeJSON(w, http.StatusAccepted, j.Snapshot())
+}
+
+func (s *Server) handleImportJob(w http.ResponseWriter, r *http.Request) {
+	var req importRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ExportPath) == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath is required"))
+		return
+	}
+	j := s.jobs.Create("import")
+	go func() {
+		j.Start()
+		j.Log("info", "开始导入任务")
+		result, err := s.exporter.Import(j.Context(), j, exporter.ImportRequest{
+			Connection:          emby.Connection{BaseURL: req.BaseURL, APIKey: req.APIKey},
+			ExportPath:          filepath.Clean(req.ExportPath),
+			Concurrency:         req.Concurrency,
+			DryRun:              req.DryRun,
+			SkipImages:          req.SkipImages,
+			IncludePeopleImages: req.IncludePeopleImages,
+			Overwrite:           req.Overwrite,
+			ImageTypes:          req.ImageTypes,
+			ToolVersion:         s.cfg.Version,
+		})
+		if err != nil {
+			j.Fail(err)
+			return
+		}
+		j.Complete(result)
+	}()
+	writeJSON(w, http.StatusAccepted, j.Snapshot())
+}
+
+func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, j.Snapshot())
+}
+
+func (s *Server) handleStopJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		return
+	}
+	stopped := j.Stop()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stopped": stopped,
+		"job":     j.Snapshot(),
+	})
+}
+
+func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming is not supported"))
+		return
+	}
+	ch, unsubscribe := j.Subscribe()
+	defer unsubscribe()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case entry, ok := <-ch:
+			if !ok {
+				data, _ := json.Marshal(j.Snapshot())
+				fmt.Fprintf(w, "event: status\ndata: %s\n\n", data)
+				fmt.Fprintf(w, "event: done\ndata: %s\n\n", data)
+				flusher.Flush()
+				return
+			}
+			data, _ := json.Marshal(entry)
+			fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) handleJobLogDownload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"emby-migrator-job-%s.log\"", id))
+	for _, entry := range j.Logs() {
+		fmt.Fprintf(w, "%s 北京时间 [%s] %s\n", beijingTime(entry.Time).Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
+	}
+}
+
+func beijingTime(value time.Time) time.Time {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return value.Local()
+	}
+	return value.In(location)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+func recoverJSON(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("%v", recovered))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
