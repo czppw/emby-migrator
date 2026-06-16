@@ -142,6 +142,19 @@ type exportItemResult struct {
 	Err   error
 }
 
+type exportPersonImageTask struct {
+	StableKey string
+	Name      string
+	RawPath   string
+}
+
+type exportPersonImageResult struct {
+	Name     string
+	Exported bool
+	Skipped  bool
+	Err      error
+}
+
 type importItemTask struct {
 	Index int
 	Item  storage.ItemEntry
@@ -392,6 +405,11 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 			manifest.Summary.ItemImages += len(entry.Images)
 		}
 	}
+	if !req.SkipImages && req.IncludePeopleImages {
+		if err := s.exportPeopleImages(ctx, j, client, exportDir, people, concurrency); err != nil {
+			return ExportResult{}, err
+		}
+	}
 	for _, p := range people.entriesSorted() {
 		manifest.People = append(manifest.People, p)
 		if p.Image != nil {
@@ -437,13 +455,13 @@ func (r *peopleRegistry) entriesSorted() []storage.PersonEntry {
 	return out
 }
 
-func (r *peopleRegistry) add(ctx context.Context, client *emby.Client, exportDir string, itemStableKey string, person emby.Person, req ExportRequest) {
+func (r *peopleRegistry) add(itemStableKey string, person emby.Person) {
 	key := storage.StablePersonKey(person)
 	personSlug := storage.SafeName(key)
 	rawPath := filepath.ToSlash(filepath.Join("people", personSlug, "raw.json"))
-	shouldFetch := false
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	p, ok := r.entries[key]
 	if !ok {
 		p = &storage.PersonEntry{
@@ -455,40 +473,133 @@ func (r *peopleRegistry) add(ctx context.Context, client *emby.Client, exportDir
 			RawPath:     rawPath,
 		}
 		r.entries[key] = p
-		shouldFetch = req.IncludePeopleImages && !req.SkipImages
 	}
 	p.ReferencedBy = append(p.ReferencedBy, itemStableKey)
-	r.mu.Unlock()
+}
 
-	if !shouldFetch {
-		return
-	}
-
-	if full, err := client.Person(ctx, person.Name); err == nil {
-		_ = storage.WriteJSON(filepath.Join(exportDir, rawPath), full)
-		r.mu.Lock()
-		if current := r.entries[key]; current != nil {
-			current.ProviderIDs = mergeProviderIDs(current.ProviderIDs, full.ProviderIDs)
+func (r *peopleRegistry) imageTasks() []exportPersonImageTask {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tasks := make([]exportPersonImageTask, 0, len(r.entries))
+	for _, p := range r.entries {
+		if strings.TrimSpace(p.Name) == "" {
+			continue
 		}
-		r.mu.Unlock()
+		tasks = append(tasks, exportPersonImageTask{StableKey: p.StableKey, Name: p.Name, RawPath: p.RawPath})
 	}
-	data, ext, err := client.DownloadPersonImage(ctx, person.Name)
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].Name < tasks[j].Name })
+	return tasks
+}
+
+func (r *peopleRegistry) update(stableKey string, update func(*storage.PersonEntry)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current := r.entries[stableKey]; current != nil {
+		update(current)
+	}
+}
+
+func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *emby.Client, exportDir string, people *peopleRegistry, concurrency int) error {
+	tasks := people.imageTasks()
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	taskCh := make(chan exportPersonImageTask)
+	resultCh := make(chan exportPersonImageResult, len(tasks))
+	workers := workerCount(len(tasks), concurrency)
+	j.Log("info", "开始导出人物头像：%d 个，并发 %d", len(tasks), workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			for task := range taskCh {
+				resultCh <- s.exportPersonImage(ctx, client, exportDir, people, task)
+			}
+		}()
+	}
+
+	go func() {
+		defer close(taskCh)
+		for _, task := range tasks {
+			select {
+			case <-ctx.Done():
+				return
+			case taskCh <- task:
+			}
+		}
+	}()
+
+	done := 0
+	exported := 0
+	skipped := 0
+	failed := 0
+	detailedFailures := 0
+	ticker := time.NewTicker(exportHeartbeatInterval)
+	defer ticker.Stop()
+	for done < len(tasks) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case result := <-resultCh:
+			done++
+			switch {
+			case result.Err != nil:
+				failed++
+				detailedFailures++
+				if detailedFailures <= 10 {
+					j.Log("warn", "人物头像导出失败：%s - %v", result.Name, result.Err)
+				} else if detailedFailures == 11 {
+					j.Log("warn", "人物头像导出失败较多，后续失败只在进度和总结中统计")
+				}
+			case result.Exported:
+				exported++
+			default:
+				skipped++
+			}
+			if done == 1 || done%peopleImageProgressEvery == 0 || done == len(tasks) {
+				j.Log("info", "人物头像导出进度：%d/%d，成功 %d，跳过 %d，失败 %d", done, len(tasks), exported, skipped, failed)
+			}
+		case <-ticker.C:
+			if done < len(tasks) {
+				j.Log("info", "人物头像导出等待中：已完成 %d/%d，剩余 %d 个；正在读取 Emby 人物信息或头像图片", done, len(tasks), len(tasks)-done)
+			}
+		}
+	}
+	j.Log("info", "人物头像导出完成：成功 %d，跳过 %d，失败 %d", exported, skipped, failed)
+	return nil
+}
+
+func (s *Service) exportPersonImage(ctx context.Context, client *emby.Client, exportDir string, people *peopleRegistry, task exportPersonImageTask) exportPersonImageResult {
+	if full, err := client.Person(ctx, task.Name); err == nil {
+		if err := storage.WriteJSON(filepath.Join(exportDir, task.RawPath), full); err != nil {
+			return exportPersonImageResult{Name: task.Name, Err: err}
+		}
+		people.update(task.StableKey, func(current *storage.PersonEntry) {
+			current.ProviderIDs = mergeProviderIDs(current.ProviderIDs, full.ProviderIDs)
+		})
+	} else if ctx.Err() != nil {
+		return exportPersonImageResult{Name: task.Name, Err: ctx.Err()}
+	}
+
+	data, ext, err := client.DownloadPersonImage(ctx, task.Name)
 	if err != nil || len(data) == 0 {
-		return
+		if ctx.Err() != nil {
+			return exportPersonImageResult{Name: task.Name, Err: ctx.Err()}
+		}
+		return exportPersonImageResult{Name: task.Name, Skipped: true}
 	}
+	personSlug := storage.SafeName(task.StableKey)
 	rel := filepath.ToSlash(filepath.Join("people", personSlug, "primary"+ext))
 	file, err := storage.WriteBytes(filepath.Join(exportDir, rel), data)
 	if err != nil {
-		return
+		return exportPersonImageResult{Name: task.Name, Err: err}
 	}
 	file.Type = "Primary"
 	file.Path = rel
 
-	r.mu.Lock()
-	if current := r.entries[key]; current != nil {
+	people.update(task.StableKey, func(current *storage.PersonEntry) {
 		current.Image = &file
-	}
-	r.mu.Unlock()
+	})
+	return exportPersonImageResult{Name: task.Name, Exported: true}
 }
 
 func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *emby.Client, exportDir string, lib emby.Library, tasks []exportItemTask, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, concurrency int) ([]exportItemResult, error) {
@@ -536,7 +647,7 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 			}
 		case <-ticker.C:
 			if done < len(tasks) {
-				j.Log("info", "导出项目等待中：%s 已完成 %d/%d，剩余 %d 个；正在下载图片/人物头像或等待远程响应", lib.Name, done, len(tasks), len(tasks)-done)
+				j.Log("info", "导出项目等待中：%s 已完成 %d/%d，剩余 %d 个；正在读取媒体图片或等待远程响应", lib.Name, done, len(tasks), len(tasks)-done)
 			}
 		}
 	}
@@ -601,7 +712,7 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 			continue
 		}
 		entry.People = append(entry.People, person.Name)
-		people.add(ctx, client, exportDir, stableKey, person, req)
+		people.add(stableKey, person)
 	}
 
 	if err := storage.WriteJSON(filepath.Join(itemDir, "info.json"), info); err != nil {

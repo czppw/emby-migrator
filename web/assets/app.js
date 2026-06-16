@@ -25,6 +25,8 @@
   };
   const MAX_LOG_LINES = 800;
   const THEME_STORAGE_KEY = "embyMigratorTheme";
+  const CONNECTION_STORAGE_KEY = "embyMigrator.connection";
+  const LEGACY_SERVER_URL_KEY = "embyMigrator.serverUrl";
   const DEFAULT_CONCURRENCY = 4;
 
   const TERMINAL_STATES = new Set([
@@ -66,7 +68,7 @@
     initTheme();
     renderImageTypes("exportImageTypes", "export");
     renderImageTypes("importImageTypes", "import");
-    restoreServerUrl();
+    restoreConnection();
     bindEvents();
     updateControls();
     checkAuth();
@@ -87,6 +89,7 @@
       "themeToggleBtn",
       "serverUrl",
       "apiKey",
+      "rememberConnection",
       "testConnectionBtn",
       "loadLibrariesBtn",
       "refreshLibrariesBtn",
@@ -152,6 +155,7 @@
 
     els.serverUrl.addEventListener("input", handleConnectionInputChanged);
     els.apiKey.addEventListener("input", handleConnectionInputChanged);
+    els.rememberConnection.addEventListener("change", handleRememberConnectionChanged);
 
     [
       els.exportSkipImages,
@@ -251,11 +255,63 @@
     }
   }
 
-  function restoreServerUrl() {
-    const storedUrl = window.localStorage.getItem("embyMigrator.serverUrl");
-    if (storedUrl) {
-      els.serverUrl.value = storedUrl;
+  function restoreConnection() {
+    els.rememberConnection.checked = true;
+    const stored = readStoredConnection();
+    if (stored.serverUrl) {
+      els.serverUrl.value = stored.serverUrl;
     }
+    if (stored.apiKey) {
+      els.apiKey.value = stored.apiKey;
+    }
+  }
+
+  function readStoredConnection() {
+    try {
+      const raw = window.localStorage.getItem(CONNECTION_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          serverUrl: String(parsed.serverUrl || ""),
+          apiKey: String(parsed.apiKey || ""),
+        };
+      }
+    } catch {
+      window.localStorage.removeItem(CONNECTION_STORAGE_KEY);
+    }
+    return {
+      serverUrl: window.localStorage.getItem(LEGACY_SERVER_URL_KEY) || "",
+      apiKey: "",
+    };
+  }
+
+  function persistConnection(connection) {
+    if (!els.rememberConnection.checked) {
+      clearStoredConnection();
+      return;
+    }
+    const value = {
+      serverUrl: connection.serverUrl,
+      apiKey: connection.apiKey,
+    };
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, JSON.stringify(value));
+    window.localStorage.setItem(LEGACY_SERVER_URL_KEY, connection.serverUrl);
+  }
+
+  function clearStoredConnection() {
+    window.localStorage.removeItem(CONNECTION_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_SERVER_URL_KEY);
+  }
+
+  function handleRememberConnectionChanged() {
+    if (els.rememberConnection.checked) {
+      const connection = getConnection();
+      if (connection.serverUrl && connection.apiKey) {
+        persistConnection(connection);
+      }
+      return;
+    }
+    clearStoredConnection();
   }
 
   function handleConnectionInputChanged() {
@@ -295,7 +351,7 @@
       setAppVersion(readFirst(data, ["toolVersion", "ToolVersion"]));
 
       state.connected = true;
-      window.localStorage.setItem("embyMigrator.serverUrl", connection.serverUrl);
+      persistConnection(connection);
       setConnectionState("ok", label || "连接成功");
       setNotice(
         els.connectionNotice,

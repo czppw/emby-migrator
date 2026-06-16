@@ -440,6 +440,11 @@ h2 {
   gap: 10px;
 }
 
+.connection-remember {
+  align-items: center;
+  color: var(--muted);
+}
+
 .checkline input,
 .option input,
 .library-item input {
