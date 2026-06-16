@@ -247,6 +247,8 @@ const (
 	itemMetadataTimeout      = 30 * time.Second
 	itemImageUploadTimeout   = 15 * time.Second
 	personImageUploadTimeout = 15 * time.Second
+	exportHeartbeatInterval  = 10 * time.Second
+	exportProgressEvery      = 25
 	importHeartbeatInterval  = 10 * time.Second
 	peopleImageProgressEvery = 25
 )
@@ -498,6 +500,7 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	taskCh := make(chan exportItemTask)
 	resultCh := make(chan exportItemResult, len(tasks))
 	workers := workerCount(len(tasks), concurrency)
+	j.Log("info", "开始处理媒体库：%s，共 %d 个项目，并发 %d", lib.Name, len(tasks), workers)
 	for i := 0; i < workers; i++ {
 		go func() {
 			for task := range taskCh {
@@ -518,14 +521,22 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 		}
 	}()
 
-	for done := 1; done <= len(tasks); done++ {
+	done := 0
+	ticker := time.NewTicker(exportHeartbeatInterval)
+	defer ticker.Stop()
+	for done < len(tasks) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case result := <-resultCh:
+			done++
 			results[result.Index] = result
-			if done == 1 || done%50 == 0 || done == len(tasks) {
+			if done == 1 || done%exportProgressEvery == 0 || done == len(tasks) {
 				j.Log("info", "处理 %s：%d/%d", lib.Name, done, len(tasks))
+			}
+		case <-ticker.C:
+			if done < len(tasks) {
+				j.Log("info", "导出项目等待中：%s 已完成 %d/%d，剩余 %d 个；正在下载图片/人物头像或等待远程响应", lib.Name, done, len(tasks), len(tasks)-done)
 			}
 		}
 	}

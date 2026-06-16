@@ -987,11 +987,16 @@
   }
 
   function setNotice(element, message, type = "") {
+    if (!element) {
+      return;
+    }
     element.classList.remove("ok", "error");
     if (type) {
       element.classList.add(type);
     }
-    element.textContent = message;
+    const text = String(message || "");
+    element.textContent = text;
+    element.classList.toggle("is-hidden", text.trim() === "");
   }
 
   function appendSystemLog(message) {
