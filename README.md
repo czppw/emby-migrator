@@ -48,6 +48,8 @@ http://服务器IP:8787
 /opt/emby-migrator/data/exports
 ```
 
+镜像默认以容器 root 用户运行，方便直接写入宿主机挂载目录。如果自行指定 `--user`，需要确保该用户对宿主机数据目录有写权限。
+
 ## Docker Compose
 
 ```yaml

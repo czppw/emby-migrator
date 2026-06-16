@@ -9,12 +9,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/emby-mi
 
 FROM alpine:3.20
 
-RUN adduser -D -H -u 10001 app
 WORKDIR /app
 COPY --from=build /out/emby-migrator /app/emby-migrator
 COPY web /app/web
-RUN mkdir -p /data /config && chown -R app:app /data /config /app
-USER app
+RUN mkdir -p /data /config
 
 ENV EMBY_MIGRATOR_ADDR=:8787 \
     EMBY_MIGRATOR_DATA=/data \
