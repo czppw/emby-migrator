@@ -596,6 +596,68 @@ func TestImportItemStillUploadsImagesWhenMetadataUpdateFails(t *testing.T) {
 	}
 }
 
+func TestImportItemFallsBackToMinimalMetadataPayloadOnSourceNullError(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "episode", "info.json"))
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{
+			Name:           "Episode With Strict Payload",
+			Type:           "Episode",
+			Overview:       "source overview",
+			ProductionYear: 2026,
+			Studios:        []emby.NameID{{Name: "Studio One"}},
+		},
+	}); err != nil {
+		t.Fatalf("WriteJSON returned error: %v", err)
+	}
+
+	fullAttempts := 0
+	minimalAttempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Episode", "Name": "Episode With Strict Payload"},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode request body: %v", err)
+			}
+			if _, hasStudios := body["Studios"]; hasStudios {
+				fullAttempts++
+				http.Error(w, "Value cannot be null. (Parameter 'source')", http.StatusBadRequest)
+				return
+			}
+			minimalAttempts++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, exportPath, storage.ItemEntry{
+		Name:     "Episode With Strict Payload",
+		Type:     "Episode",
+		InfoPath: infoRel,
+	}, ImportRequest{})
+	if match.Status != "updated" || match.Error != "" {
+		t.Fatalf("fallback should make metadata update succeed, got %#v", match)
+	}
+	if fullAttempts != 1 || minimalAttempts != 1 {
+		t.Fatalf("attempts full=%d minimal=%d, want 1/1", fullAttempts, minimalAttempts)
+	}
+}
+
 func TestFindMatchReturnsSearchErrorInsteadOfFalseUnmatched(t *testing.T) {
 	client := newFindMatchTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary upstream failure", http.StatusBadGateway)

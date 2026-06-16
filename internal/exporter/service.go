@@ -2,7 +2,6 @@ package exporter
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1092,9 +1091,7 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, exportPat
 	}
 	current := target
 	mergeItemMetadata(&current, entry, exportPath)
-	metadataErr := retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
-		return client.UpdateItem(attemptCtx, target.ID, current)
-	})
+	metadataErr := updateItemMetadata(ctx, client, target.ID, current)
 	if !req.SkipImages {
 		imageTypeSet := allowedImageTypes(req.ImageTypes)
 		for _, img := range entry.Images {
@@ -1125,6 +1122,43 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, exportPat
 	}
 	match.Status = "updated"
 	return match
+}
+
+func updateItemMetadata(ctx context.Context, client *emby.Client, targetID string, item emby.Item) error {
+	err := retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
+		return client.UpdateItem(attemptCtx, targetID, item)
+	})
+	if err == nil || !shouldRetryWithMinimalMetadata(err) {
+		return err
+	}
+	fallback := item
+	fallback.Raw = minimalMetadataPayload(item.Raw)
+	return retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
+		return client.UpdateItem(attemptCtx, targetID, fallback)
+	})
+}
+
+func shouldRetryWithMinimalMetadata(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "http 400") ||
+		strings.Contains(text, "value cannot be null") ||
+		strings.Contains(text, "parameter 'source'")
+}
+
+func minimalMetadataPayload(raw map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{"Id", "Type", "Name", "Source", "ProviderIds"} {
+		if value, ok := raw[key]; ok && value != nil {
+			out[key] = value
+		}
+	}
+	if _, ok := out["Source"]; !ok {
+		out["Source"] = "Unknown"
+	}
+	return out
 }
 
 func retryWithTimeout(ctx context.Context, attempts int, timeout time.Duration, operation func(context.Context) error) error {
@@ -1227,7 +1261,6 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 	if _, ok := payload["Source"]; !ok {
 		payload["Source"] = "Unknown"
 	}
-	copyPortableRawMetadata(payload, source.Raw)
 	if source.Name != "" {
 		setIfNotEmpty(payload, "Name", source.Name)
 	} else if entry.Name != "" {
@@ -1273,63 +1306,6 @@ func copyCurrentUpdateContext(target map[string]any, current map[string]any) {
 		if value, ok := current[key]; ok && value != nil {
 			target[key] = value
 		}
-	}
-}
-
-func copyPortableRawMetadata(target map[string]any, source map[string]any) {
-	if len(source) == 0 {
-		return
-	}
-	keys := []string{
-		"SortName",
-		"ForcedSortName",
-		"ShortOverview",
-		"CustomRating",
-		"EndDate",
-		"CriticRating",
-		"ProductionLocations",
-		"Status",
-		"DisplayOrder",
-		"AirDays",
-		"AirTime",
-	}
-	for _, key := range keys {
-		if value, ok := portableRawValue(source[key]); ok {
-			target[key] = value
-		}
-	}
-}
-
-func portableRawValue(value any) (any, bool) {
-	switch v := value.(type) {
-	case nil:
-		return nil, false
-	case string:
-		return v, strings.TrimSpace(v) != ""
-	case bool:
-		return v, true
-	case int, int64, float64, json.Number:
-		return v, true
-	case []string:
-		return v, len(v) > 0
-	case []any:
-		out := make([]any, 0, len(v))
-		for _, item := range v {
-			switch scalar := item.(type) {
-			case string:
-				if strings.TrimSpace(scalar) != "" {
-					out = append(out, scalar)
-				}
-			case bool, int, int64, float64, json.Number:
-				out = append(out, scalar)
-			}
-		}
-		if len(out) == 0 {
-			return nil, false
-		}
-		return out, true
-	default:
-		return nil, false
 	}
 }
 
