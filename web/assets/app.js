@@ -57,6 +57,7 @@
     eventSource: null,
     sseErrorReported: false,
     pollTimer: 0,
+    seenLogLines: new Set(),
   };
 
   const els = {};
@@ -151,6 +152,7 @@
     els.copyLogsBtn.addEventListener("click", handleCopyLogs);
     els.clearLogsBtn.addEventListener("click", () => {
       els.logWindow.textContent = "";
+      state.seenLogLines.clear();
     });
 
     els.serverUrl.addEventListener("input", handleConnectionInputChanged);
@@ -884,6 +886,7 @@
   function beginJob(jobId, kind, initialData) {
     state.currentJobId = String(jobId);
     state.currentJobKind = kind;
+    state.seenLogLines.clear();
     closeLogStream();
     stopPolling();
     renderJobStatus({ ...safeObject(initialData), id: jobId, status: "queued" }, kind);
@@ -918,7 +921,10 @@
     });
 
     source.addEventListener("done", (event) => {
-      handleLogEvent(event.data);
+      const data = parseMaybeJson(event.data);
+      if (data && typeof data === "object") {
+        renderJobStatus(safeObject(data), state.currentJobKind);
+      }
       stopPolling();
       closeLogStream();
     });
@@ -1061,10 +1067,28 @@
 
   function appendLog(message) {
     const sanitized = sanitizeLogText(String(message || ""));
+    const normalized = sanitized.trimEnd();
+    if (!normalized || state.seenLogLines.has(normalized)) {
+      return;
+    }
+    state.seenLogLines.add(normalized);
+    compactSeenLogLines();
     const line = sanitized.endsWith("\n") ? sanitized : `${sanitized}\n`;
     els.logWindow.textContent += line;
     trimLogWindow();
     els.logWindow.scrollTop = els.logWindow.scrollHeight;
+  }
+
+  function compactSeenLogLines() {
+    if (state.seenLogLines.size <= MAX_LOG_LINES * 3) {
+      return;
+    }
+    state.seenLogLines = new Set(
+      els.logWindow.textContent
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter(Boolean),
+    );
   }
 
   function trimLogWindow() {
