@@ -79,6 +79,8 @@ services:
 - `DOCKERHUB_USERNAME`：Docker Hub 用户名
 - `DOCKERHUB_TOKEN`：Docker Hub Access Token
 
+未配置这两个 secrets 时，GitHub Actions 会跳过镜像推送，不会把 workflow 标红。
+
 Docker Hub 里建议提前创建仓库：
 
 ```text
