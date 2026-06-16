@@ -2,8 +2,7 @@ services:
   emby-migrator:
     image: ${EMBY_MIGRATOR_IMAGE:-czppwa/emby-migrator:latest}
     container_name: emby-migrator
-    ports:
-      - "8787:8787"
+    network_mode: host
     environment:
       TZ: Asia/Shanghai
       EMBY_MIGRATOR_PASSWORD: password

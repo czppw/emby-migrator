@@ -28,7 +28,7 @@ mkdir -p /opt/emby-migrator/data /opt/emby-migrator/config
 docker run -d \
   --name emby-migrator \
   --restart unless-stopped \
-  -p 8787:8787 \
+  --network host \
   -e TZ=Asia/Shanghai \
   -e EMBY_MIGRATOR_PASSWORD=password \
   -v /opt/emby-migrator/data:/data \
@@ -41,6 +41,8 @@ docker run -d \
 ```text
 http://服务器IP:8787
 ```
+
+默认使用 host 网络模式，容器内访问 `127.0.0.1` 就是宿主机本机，方便连接本机 Emby、代理或反向代理。host 模式下不需要 `-p` 端口映射；如果宿主机 `8787` 已被占用，可以增加 `-e EMBY_MIGRATOR_ADDR=:8788` 改端口。
 
 导出完成后，导出包会在宿主机：
 
@@ -57,8 +59,7 @@ services:
   emby-migrator:
     image: czppwa/emby-migrator:latest
     container_name: emby-migrator
-    ports:
-      - "8787:8787"
+    network_mode: host
     environment:
       TZ: Asia/Shanghai
       EMBY_MIGRATOR_PASSWORD: password
@@ -70,11 +71,13 @@ services:
 
 ## 连接 Emby 注意事项
 
-容器内的 `localhost` 指容器自身。访问宿主机 Emby 时：
+默认 host 网络模式下，容器内的 `localhost` / `127.0.0.1` 指宿主机本机。访问本机 Emby、代理或反向代理时可以直接填写本机地址，例如：
 
-- Windows/macOS Docker Desktop 通常可用 `host.docker.internal`
-- Linux 推荐使用宿主机局域网 IP，例如 `http://192.168.1.10:8096`
-- 如果 Emby 在另一台服务器，直接填远程服务器地址和端口
+```text
+http://127.0.0.1:8096
+```
+
+如果 Emby 在另一台服务器，直接填远程服务器地址和端口。
 
 ## 本地开发
 
