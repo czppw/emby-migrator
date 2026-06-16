@@ -33,7 +33,7 @@ docker run -d \
   -e EMBY_MIGRATOR_PASSWORD=password \
   -v /opt/emby-migrator/data:/data \
   -v /opt/emby-migrator/config:/config \
-  <dockerhub-username>/emby-migrator:latest
+  czppwa/emby-migrator:latest
 ```
 
 打开：
@@ -53,7 +53,7 @@ http://服务器IP:8787
 ```yaml
 services:
   emby-migrator:
-    image: <dockerhub-username>/emby-migrator:latest
+    image: czppwa/emby-migrator:latest
     container_name: emby-migrator
     ports:
       - "8787:8787"
@@ -70,9 +70,9 @@ services:
 
 仓库已包含 `.github/workflows/dockerhub.yml`。推送到 `main` 或推送 `v*` 标签时，会自动构建并推送：
 
-- `DOCKERHUB_USERNAME/emby-migrator:latest`
-- `DOCKERHUB_USERNAME/emby-migrator:vX.Y.Z`
-- `DOCKERHUB_USERNAME/emby-migrator:sha-xxxxxxx`
+- `czppwa/emby-migrator:latest`
+- `czppwa/emby-migrator:vX.Y.Z`
+- `czppwa/emby-migrator:sha-xxxxxxx`
 
 在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 添加：
 
@@ -84,7 +84,7 @@ services:
 Docker Hub 里建议提前创建仓库：
 
 ```text
-emby-migrator
+czppwa/emby-migrator
 ```
 
 ## 连接 Emby 注意事项

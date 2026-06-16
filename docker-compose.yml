@@ -1,7 +1,6 @@
 services:
   emby-migrator:
-    image: ${EMBY_MIGRATOR_IMAGE:-emby-migrator:local}
-    build: .
+    image: ${EMBY_MIGRATOR_IMAGE:-czppwa/emby-migrator:latest}
     container_name: emby-migrator
     ports:
       - "8787:8787"
