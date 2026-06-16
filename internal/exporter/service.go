@@ -681,6 +681,7 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 }
 
 func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry) (storage.ItemEntry, error) {
+	item = s.enrichExportItem(ctx, client, item)
 	stableKey := storage.StableItemKey(item)
 	itemDir := filepath.Join(exportDir, "libraries", storage.SafeName(lib.Name), "items", itemSlug)
 	infoRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "info.json"))
@@ -748,6 +749,73 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		return entry, err
 	}
 	return entry, nil
+}
+
+func (s *Service) enrichExportItem(ctx context.Context, client *emby.Client, item emby.Item) emby.Item {
+	if strings.TrimSpace(item.ID) == "" || !needsExportItemDetails(item) {
+		return item
+	}
+	full, err := client.Item(ctx, item.ID)
+	if err != nil || strings.TrimSpace(full.ID) == "" {
+		return item
+	}
+	return mergeExportItemDetails(item, full)
+}
+
+func needsExportItemDetails(item emby.Item) bool {
+	return len(item.People) == 0 ||
+		(len(item.ImageTags) == 0 && len(item.BackdropImageTags) == 0) ||
+		item.SeriesName == "" && item.Type == "Episode" ||
+		item.IndexNumber == 0 && (item.Type == "Episode" || item.Type == "Season")
+}
+
+func mergeExportItemDetails(base, full emby.Item) emby.Item {
+	if full.ID == "" {
+		full.ID = base.ID
+	}
+	if full.Name == "" {
+		full.Name = base.Name
+	}
+	if full.Type == "" {
+		full.Type = base.Type
+	}
+	if full.Path == "" {
+		full.Path = base.Path
+	}
+	if full.OriginalTitle == "" {
+		full.OriginalTitle = base.OriginalTitle
+	}
+	if full.ProductionYear == 0 {
+		full.ProductionYear = base.ProductionYear
+	}
+	if full.SeriesName == "" {
+		full.SeriesName = base.SeriesName
+	}
+	if full.SeasonName == "" {
+		full.SeasonName = base.SeasonName
+	}
+	if full.IndexNumber == 0 {
+		full.IndexNumber = base.IndexNumber
+	}
+	if full.ParentIndexNumber == 0 {
+		full.ParentIndexNumber = base.ParentIndexNumber
+	}
+	if len(full.ProviderIDs) == 0 {
+		full.ProviderIDs = base.ProviderIDs
+	}
+	if len(full.People) == 0 {
+		full.People = base.People
+	}
+	if len(full.ImageTags) == 0 {
+		full.ImageTags = base.ImageTags
+	}
+	if len(full.BackdropImageTags) == 0 {
+		full.BackdropImageTags = base.BackdropImageTags
+	}
+	if full.Raw == nil {
+		full.Raw = base.Raw
+	}
+	return full
 }
 
 func itemDirectoryBase(item emby.Item) string {

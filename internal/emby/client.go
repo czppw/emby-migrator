@@ -506,6 +506,10 @@ func (c *Client) Items(ctx context.Context, libraryID string) ([]Item, error) {
 		"People",
 		"Chapters",
 		"OriginalTitle",
+		"SeriesName",
+		"SeasonName",
+		"IndexNumber",
+		"ParentIndexNumber",
 		"ImageTags",
 		"BackdropImageTags",
 	}, ",")
@@ -602,7 +606,7 @@ func (c *Client) ItemsByProviderID(ctx context.Context, providerID string) ([]It
 func (c *Client) Item(ctx context.Context, id string) (Item, error) {
 	var item Item
 	err := c.JSON(ctx, http.MethodGet, "/Items/"+url.PathEscape(id), url.Values{
-		"Fields": {"Path,MediaSources,MediaStreams,Overview,Genres,Studios,Tags,Taglines,ProviderIds,OfficialRating,ProductionYear,PremiereDate,CommunityRating,People,Chapters,OriginalTitle,ImageTags,BackdropImageTags"},
+		"Fields": {"Path,MediaSources,MediaStreams,Overview,Genres,Studios,Tags,Taglines,ProviderIds,OfficialRating,ProductionYear,PremiereDate,CommunityRating,People,Chapters,OriginalTitle,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,ImageTags,BackdropImageTags"},
 	}, nil, &item)
 	return item, err
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"emby-migrator/internal/emby"
+	"emby-migrator/internal/job"
 	"emby-migrator/internal/storage"
 )
 
@@ -101,6 +102,84 @@ func TestSummaryLines(t *testing.T) {
 	})
 	if want := "导入验证总结：项目 2 个，匹配 1 个，未匹配 0 个，歧义 1 个，错误 0 个，用时 1秒；本次未写入元数据和图片。"; dryRunLine != want {
 		t.Fatalf("dry-run importSummaryLine = %q, want %q", dryRunLine, want)
+	}
+}
+
+func TestExportEnrichesItemsWhenListResponseOmitsImagesAndPeople(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.9.5.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("ParentId") == "lib-movies":
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{
+						"Id":   "item-1",
+						"Name": "Movie From List",
+						"Type": "Movie",
+						"Path": `D:\Movies\Movie From List.mkv`,
+					},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1":
+			writeExporterJSON(t, w, map[string]any{
+				"Id":          "item-1",
+				"Name":        "Movie From Detail",
+				"Type":        "Movie",
+				"Path":        `D:\Movies\Movie From Detail.mkv`,
+				"ProviderIds": map[string]string{"Tmdb": "123"},
+				"ImageTags":   map[string]string{"Primary": "primary-tag"},
+				"People": []map[string]any{
+					{
+						"Name":            "Actor One",
+						"Type":            "Actor",
+						"Role":            "Lead",
+						"ProviderIds":     map[string]string{"Tmdb": "456"},
+						"PrimaryImageTag": "person-tag",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images":
+			writeExporterJSON(t, w, []map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images/Primary":
+			writeExporterImage(w)
+		case r.Method == http.MethodGet && r.URL.Path == "/Persons/Actor One":
+			writeExporterJSON(t, w, map[string]any{
+				"Name":        "Actor One",
+				"Id":          "person-1",
+				"ProviderIds": map[string]string{"Tmdb": "456"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Persons/Actor One/Images/Primary":
+			writeExporterImage(w)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(t.TempDir())
+	manager := job.NewManager()
+	j := manager.Create("export")
+	j.Start()
+
+	result, err := service.Export(context.Background(), j, ExportRequest{
+		Connection:          emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries:           []emby.Library{{ID: "lib-movies", Name: "Movies"}},
+		ImageTypes:          []string{"Primary"},
+		IncludePeopleImages: true,
+	})
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	if result.Manifest.Summary.ItemImages != 1 {
+		t.Fatalf("item images = %d, want 1", result.Manifest.Summary.ItemImages)
+	}
+	if result.Manifest.Summary.People != 1 {
+		t.Fatalf("people = %d, want 1", result.Manifest.Summary.People)
+	}
+	if result.Manifest.Summary.PeopleImages != 1 {
+		t.Fatalf("people images = %d, want 1", result.Manifest.Summary.PeopleImages)
 	}
 }
 
@@ -628,4 +707,9 @@ func writeExporterJSON(t *testing.T, w http.ResponseWriter, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		t.Fatalf("failed to write JSON response: %v", err)
 	}
+}
+
+func writeExporterImage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "image/jpeg")
+	_, _ = w.Write([]byte("fake-image-bytes"))
 }
