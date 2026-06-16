@@ -66,13 +66,16 @@ func TestSummaryLines(t *testing.T) {
 		People:       6,
 		PeopleImages: 4,
 		Errors:       1,
-	})
-	if want := "导出总结：媒体库 2 个，项目 10 个，媒体图片 25 张，人物 6 个，人物头像 4 张，错误 1 个。"; exportLine != want {
+	}, time.Minute+23*time.Second)
+	if want := "导出总结：媒体库 2 个，项目 10 个，媒体图片 25 张，人物 6 个，人物头像 4 张，错误 1 个，用时 1分23秒。"; exportLine != want {
 		t.Fatalf("exportSummaryLine = %q, want %q", exportLine, want)
 	}
 
+	startedAt := time.Date(2026, 6, 16, 18, 0, 0, 0, time.Local)
 	importLine := importSummaryLine(ImportReport{
-		Matches: []ImportMatch{{}, {}, {}},
+		StartedAt: startedAt,
+		EndedAt:   startedAt.Add(2*time.Hour + 3*time.Minute + 4*time.Second),
+		Matches:   []ImportMatch{{}, {}, {}},
 		Summary: storage.Summary{
 			MetadataUpdated:    2,
 			Unmatched:          1,
@@ -82,19 +85,21 @@ func TestSummaryLines(t *testing.T) {
 			PeopleImagesFailed: 2,
 		},
 	})
-	if want := "导入总结：项目 3 个，元数据成功 2 个，未匹配 1 个，歧义 0 个，错误 0 个，媒体图片成功 5 张/失败 1 张，人物头像成功 3 张/失败 2 张。"; importLine != want {
+	if want := "导入总结：项目 3 个，元数据成功 2 个，未匹配 1 个，歧义 0 个，错误 0 个，媒体图片成功 5 张/失败 1 张，人物头像成功 3 张/失败 2 张，用时 2小时3分4秒。"; importLine != want {
 		t.Fatalf("importSummaryLine = %q, want %q", importLine, want)
 	}
 
 	dryRunLine := importSummaryLine(ImportReport{
-		DryRun:  true,
-		Matches: []ImportMatch{{}, {}},
+		StartedAt: startedAt,
+		EndedAt:   startedAt.Add(900 * time.Millisecond),
+		DryRun:    true,
+		Matches:   []ImportMatch{{}, {}},
 		Summary: storage.Summary{
 			Matched:   1,
 			Ambiguous: 1,
 		},
 	})
-	if want := "导入验证总结：项目 2 个，匹配 1 个，未匹配 0 个，歧义 1 个，错误 0 个；本次未写入元数据和图片。"; dryRunLine != want {
+	if want := "导入验证总结：项目 2 个，匹配 1 个，未匹配 0 个，歧义 1 个，错误 0 个，用时 1秒；本次未写入元数据和图片。"; dryRunLine != want {
 		t.Fatalf("dry-run importSummaryLine = %q, want %q", dryRunLine, want)
 	}
 }

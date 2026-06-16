@@ -304,6 +304,7 @@ func (s *Service) ListExports() ([]string, error) {
 }
 
 func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (ExportResult, error) {
+	startedAt := time.Now()
 	client, err := emby.NewClient(req.Connection.BaseURL, req.Connection.APIKey)
 	if err != nil {
 		return ExportResult{}, err
@@ -424,20 +425,45 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 		return ExportResult{}, err
 	}
 	j.Log("info", "导出完成：%s", exportDir)
-	j.Log("info", exportSummaryLine(manifest.Summary))
+	j.Log("info", exportSummaryLine(manifest.Summary, time.Since(startedAt)))
 	return ExportResult{Path: exportDir, Manifest: manifest}, nil
 }
 
-func exportSummaryLine(summary storage.Summary) string {
+func exportSummaryLine(summary storage.Summary, elapsed time.Duration) string {
 	return fmt.Sprintf(
-		"导出总结：媒体库 %d 个，项目 %d 个，媒体图片 %d 张，人物 %d 个，人物头像 %d 张，错误 %d 个。",
+		"导出总结：媒体库 %d 个，项目 %d 个，媒体图片 %d 张，人物 %d 个，人物头像 %d 张，错误 %d 个，用时 %s。",
 		summary.Libraries,
 		summary.Items,
 		summary.ItemImages,
 		summary.People,
 		summary.PeopleImages,
 		summary.Errors,
+		formatElapsed(elapsed),
 	)
+}
+
+func formatElapsed(elapsed time.Duration) string {
+	elapsed = elapsed.Round(time.Second)
+	if elapsed < time.Second {
+		return "不足1秒"
+	}
+	hours := int(elapsed / time.Hour)
+	elapsed -= time.Duration(hours) * time.Hour
+	minutes := int(elapsed / time.Minute)
+	elapsed -= time.Duration(minutes) * time.Minute
+	seconds := int(elapsed / time.Second)
+
+	parts := make([]string, 0, 3)
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%d小时", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%d分", minutes))
+	}
+	if seconds > 0 || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%d秒", seconds))
+	}
+	return strings.Join(parts, "")
 }
 
 func newPeopleRegistry() *peopleRegistry {
@@ -815,18 +841,20 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 
 func importSummaryLine(report ImportReport) string {
 	total := len(report.Matches)
+	elapsed := formatElapsed(reportElapsed(report))
 	if report.DryRun {
 		return fmt.Sprintf(
-			"导入验证总结：项目 %d 个，匹配 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个；本次未写入元数据和图片。",
+			"导入验证总结：项目 %d 个，匹配 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个，用时 %s；本次未写入元数据和图片。",
 			total,
 			report.Summary.Matched,
 			report.Summary.Unmatched,
 			report.Summary.Ambiguous,
 			report.Summary.Errors,
+			elapsed,
 		)
 	}
 	return fmt.Sprintf(
-		"导入总结：项目 %d 个，元数据成功 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个，媒体图片成功 %d 张/失败 %d 张，人物头像成功 %d 张/失败 %d 张。",
+		"导入总结：项目 %d 个，元数据成功 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个，媒体图片成功 %d 张/失败 %d 张，人物头像成功 %d 张/失败 %d 张，用时 %s。",
 		total,
 		report.Summary.MetadataUpdated,
 		report.Summary.Unmatched,
@@ -836,7 +864,22 @@ func importSummaryLine(report ImportReport) string {
 		report.Summary.ItemImagesFailed,
 		report.Summary.PeopleImages,
 		report.Summary.PeopleImagesFailed,
+		elapsed,
 	)
+}
+
+func reportElapsed(report ImportReport) time.Duration {
+	if report.StartedAt.IsZero() {
+		return 0
+	}
+	end := report.EndedAt
+	if end.IsZero() {
+		end = time.Now()
+	}
+	if end.Before(report.StartedAt) {
+		return 0
+	}
+	return end.Sub(report.StartedAt)
 }
 
 func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool) {
