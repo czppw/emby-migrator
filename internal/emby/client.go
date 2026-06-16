@@ -658,6 +658,25 @@ func FallbackImages(item Item) []ImageInfo {
 	return images
 }
 
+func DirectImageInfos(itemID string, imageTypes []string) []ImageInfo {
+	if len(imageTypes) == 0 {
+		imageTypes = DefaultImageTypes
+	}
+	images := make([]ImageInfo, 0, len(imageTypes))
+	for _, typ := range imageTypes {
+		typ = strings.TrimSpace(typ)
+		if typ == "" {
+			continue
+		}
+		images = append(images, ImageInfo{
+			ImageType:    typ,
+			IsFallback:   true,
+			DownloadPath: "/Items/" + url.PathEscape(itemID) + "/Images/" + url.PathEscape(typ),
+		})
+	}
+	return images
+}
+
 func imagePath(itemID string, image ImageInfo) string {
 	base := "/Items/" + url.PathEscape(itemID) + "/Images/" + url.PathEscape(image.ImageType)
 	if image.ImageType == "Backdrop" || image.ImageIndex > 0 {
@@ -721,7 +740,11 @@ func (c *Client) uploadImagePath(ctx context.Context, endpoint string, data []by
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "image/jpeg")
+	contentType := http.DetectContentType(data)
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = "image/jpeg"
+	}
+	req.Header.Set("Content-Type", contentType)
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err

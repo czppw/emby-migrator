@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -129,7 +130,6 @@ func TestExportEnrichesItemsWhenListResponseOmitsImagesAndPeople(t *testing.T) {
 				"Type":        "Movie",
 				"Path":        `D:\Movies\Movie From Detail.mkv`,
 				"ProviderIds": map[string]string{"Tmdb": "123"},
-				"ImageTags":   map[string]string{"Primary": "primary-tag"},
 				"People": []map[string]any{
 					{
 						"Name":            "Actor One",
@@ -426,7 +426,26 @@ func TestFindMatchUsesSeasonParentPathToAvoidFirstSeasonAmbiguity(t *testing.T) 
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
 			return
 		}
-		if got := r.URL.Query().Get("SearchTerm"); got != "第 1 季" {
+		if got := r.URL.Query().Get("SearchTerm"); got == "Season 1" {
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{
+						"Id":   "target-reply-1988-season-1",
+						"Type": "Season",
+						"Name": "第 1 季",
+						"Path": `/new/日韩剧集/请回答1988 (2015) {tmdb-64010}/Season 1`,
+					},
+					{
+						"Id":   "target-iron-education-season-1",
+						"Type": "Season",
+						"Name": "第 1 季",
+						"Path": `/new/日韩剧集/铁拳教育 (2026) {tmdb-276161}/Season 1`,
+					},
+				},
+				"TotalRecordCount": 2,
+			})
+			return
+		} else if got != "第 1 季" {
 			http.Error(w, "unexpected SearchTerm "+got, http.StatusBadRequest)
 			return
 		}
@@ -463,6 +482,117 @@ func TestFindMatchUsesSeasonParentPathToAvoidFirstSeasonAmbiguity(t *testing.T) 
 	}
 	if target.ID != "target-reply-1988-season-1" || reason != "season-parent" || len(candidates) != 1 {
 		t.Fatalf("season parent match failed: target=%#v reason=%q candidates=%#v", target, reason, candidates)
+	}
+}
+
+func TestMergeItemMetadataBuildsPortablePayloadWithoutOldInternalIDs(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{
+			Name:            "Source Movie",
+			Type:            "Movie",
+			Overview:        "source overview",
+			ProductionYear:  2026,
+			CommunityRating: 8.5,
+			Genres:          []string{"Drama"},
+			Tags:            []string{"favorite"},
+			Taglines:        []string{"tagline"},
+			Studios:         []emby.NameID{{Name: "Old Studio", ID: "old-studio-id"}},
+			ProviderIDs:     map[string]string{"Tmdb": "123"},
+			People:          []emby.Person{{Name: "Actor One", ID: "old-person-id"}},
+			Raw: map[string]any{
+				"SortName": "Source Movie",
+				"People": []any{
+					map[string]any{"Name": "Actor One", "Id": "old-person-id"},
+				},
+				"Studios": []any{
+					map[string]any{"Name": "Old Studio", "Id": "old-studio-id"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("WriteJSON returned error: %v", err)
+	}
+
+	current := emby.Item{
+		ID:   "target-id",
+		Type: "Movie",
+		Name: "Target Movie",
+		Raw:  map[string]any{"Source": "Library"},
+	}
+	mergeItemMetadata(&current, storage.ItemEntry{Name: "Source Movie", InfoPath: infoRel}, exportPath)
+
+	if current.Raw["Id"] != "target-id" {
+		t.Fatalf("payload should keep target id, got %#v", current.Raw)
+	}
+	if _, ok := current.Raw["People"]; ok {
+		t.Fatalf("payload must not copy old People ids: %#v", current.Raw["People"])
+	}
+	studios, ok := current.Raw["Studios"].([]map[string]string)
+	if !ok || len(studios) != 1 || studios[0]["Name"] != "Old Studio" {
+		t.Fatalf("payload should keep studio names only, got %#v", current.Raw["Studios"])
+	}
+	if _, ok := studios[0]["Id"]; ok {
+		t.Fatalf("payload leaked old studio id: %#v", studios[0])
+	}
+}
+
+func TestImportItemStillUploadsImagesWhenMetadataUpdateFails(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	imageRel := filepath.ToSlash(filepath.Join("items", "movie", "primary.jpg"))
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{Name: "Movie With Poster", Type: "Movie", Overview: "source overview"},
+	}); err != nil {
+		t.Fatalf("WriteJSON returned error: %v", err)
+	}
+	if _, err := storage.WriteBytes(filepath.Join(exportPath, filepath.FromSlash(imageRel)), []byte("fake-image-bytes")); err != nil {
+		t.Fatalf("WriteBytes returned error: %v", err)
+	}
+
+	updateAttempts := 0
+	imageUploads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Movie", "Name": "Movie With Poster"},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			updateAttempts++
+			http.Error(w, "SQLitePCL.pretty.SQLiteException", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id/Images/Primary":
+			imageUploads++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, exportPath, storage.ItemEntry{
+		Name:     "Movie With Poster",
+		Type:     "Movie",
+		InfoPath: infoRel,
+		Images:   []storage.FileEntry{{Type: "Primary", Path: imageRel}},
+	}, ImportRequest{ImageTypes: []string{"Primary"}})
+	if match.Status != "failed" || match.Error == "" {
+		t.Fatalf("metadata failure should be reported, got %#v", match)
+	}
+	if match.ImagesPushed != 1 || imageUploads != 1 {
+		t.Fatalf("image should still upload after metadata failure, match=%#v uploads=%d", match, imageUploads)
+	}
+	if updateAttempts != importRetryAttempts {
+		t.Fatalf("metadata update attempts = %d, want %d", updateAttempts, importRetryAttempts)
 	}
 }
 

@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -711,6 +712,9 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		images, err := client.Images(ctx, item.ID)
 		if err != nil || len(images) == 0 {
 			images = emby.FallbackImages(item)
+			if len(images) == 0 {
+				images = emby.DirectImageInfos(item.ID, imageTypesForDirectFallback(req.ImageTypes))
+			}
 		}
 		for _, image := range images {
 			if len(imageTypeSet) > 0 && !imageTypeSet[strings.ToLower(image.ImageType)] {
@@ -818,6 +822,13 @@ func mergeExportItemDetails(base, full emby.Item) emby.Item {
 	return full
 }
 
+func imageTypesForDirectFallback(imageTypes []string) []string {
+	if len(imageTypes) == 0 {
+		return emby.DefaultImageTypes
+	}
+	return imageTypes
+}
+
 func itemDirectoryBase(item emby.Item) string {
 	if strings.TrimSpace(item.Path) != "" {
 		stem := mediaPathStem(item.Path)
@@ -867,6 +878,9 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	client, err := emby.NewClient(req.Connection.BaseURL, req.Connection.APIKey)
 	if err != nil {
 		return ImportResult{}, err
+	}
+	if info, err := client.SystemInfo(ctx); err == nil {
+		j.Log("info", "连接到目标 Emby %s (%s)", info.ServerName, info.Version)
 	}
 	exportPath := req.ExportPath
 	if !filepath.IsAbs(exportPath) {
@@ -1078,13 +1092,9 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, exportPat
 	}
 	current := target
 	mergeItemMetadata(&current, entry, exportPath)
-	if err := retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
+	metadataErr := retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
 		return client.UpdateItem(attemptCtx, target.ID, current)
-	}); err != nil {
-		match.Status = "failed"
-		match.Error = err.Error()
-		return match
-	}
+	})
 	if !req.SkipImages {
 		imageTypeSet := allowedImageTypes(req.ImageTypes)
 		for _, img := range entry.Images {
@@ -1107,6 +1117,11 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, exportPat
 				match.ImageErrors = append(match.ImageErrors, fmt.Sprintf("%s 上传失败: %v", img.Type, err))
 			}
 		}
+	}
+	if metadataErr != nil {
+		match.Status = "failed"
+		match.Error = metadataErr.Error()
+		return match
 	}
 	match.Status = "updated"
 	return match
@@ -1204,67 +1219,130 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 	if err := storage.ReadJSON(filepath.Join(exportPath, filepath.FromSlash(entry.InfoPath)), &info); err != nil {
 		return
 	}
-	if current.Raw == nil {
-		current.Raw = map[string]any{}
-	}
-	setIfNotEmpty(current.Raw, "Id", current.ID)
-	setIfNotEmpty(current.Raw, "Type", current.Type)
 	source := info.Item
-	copyPortableMetadata(current.Raw, source.Raw)
-	setIfNotEmpty(current.Raw, "Name", source.Name)
-	setIfNotEmpty(current.Raw, "OriginalTitle", source.OriginalTitle)
-	setIfNotEmpty(current.Raw, "Overview", source.Overview)
-	setIfNotEmpty(current.Raw, "OfficialRating", source.OfficialRating)
-	setIfNotEmpty(current.Raw, "PremiereDate", source.PremiereDate)
+	payload := map[string]any{}
+	setIfNotEmpty(payload, "Id", current.ID)
+	setIfNotEmpty(payload, "Type", current.Type)
+	copyCurrentUpdateContext(payload, current.Raw)
+	if _, ok := payload["Source"]; !ok {
+		payload["Source"] = "Unknown"
+	}
+	copyPortableRawMetadata(payload, source.Raw)
+	if source.Name != "" {
+		setIfNotEmpty(payload, "Name", source.Name)
+	} else if entry.Name != "" {
+		setIfNotEmpty(payload, "Name", entry.Name)
+	} else {
+		setIfNotEmpty(payload, "Name", current.Name)
+	}
+	setIfNotEmpty(payload, "OriginalTitle", source.OriginalTitle)
+	setIfNotEmpty(payload, "Overview", source.Overview)
+	setIfNotEmpty(payload, "OfficialRating", source.OfficialRating)
+	setIfNotEmpty(payload, "PremiereDate", source.PremiereDate)
 	if source.ProductionYear != 0 {
-		current.Raw["ProductionYear"] = source.ProductionYear
+		payload["ProductionYear"] = source.ProductionYear
 	}
 	if source.CommunityRating != 0 {
-		current.Raw["CommunityRating"] = source.CommunityRating
+		payload["CommunityRating"] = source.CommunityRating
 	}
 	if len(source.Genres) > 0 {
-		current.Raw["Genres"] = source.Genres
+		payload["Genres"] = source.Genres
+	}
+	if len(source.Tags) > 0 {
+		payload["Tags"] = source.Tags
+	}
+	if len(source.Taglines) > 0 {
+		payload["Taglines"] = source.Taglines
+	}
+	if studios := portableNameIDs(source.Studios); len(studios) > 0 {
+		payload["Studios"] = studios
 	}
 	if len(source.ProviderIDs) > 0 {
-		current.Raw["ProviderIds"] = source.ProviderIDs
+		payload["ProviderIds"] = source.ProviderIDs
+	} else if len(current.ProviderIDs) > 0 {
+		payload["ProviderIds"] = current.ProviderIDs
+	}
+	current.Raw = payload
+}
+
+func copyCurrentUpdateContext(target map[string]any, current map[string]any) {
+	if len(current) == 0 {
+		return
+	}
+	for _, key := range []string{"Source", "ParentId"} {
+		if value, ok := current[key]; ok && value != nil {
+			target[key] = value
+		}
 	}
 }
 
-func copyPortableMetadata(target map[string]any, source map[string]any) {
+func copyPortableRawMetadata(target map[string]any, source map[string]any) {
 	if len(source) == 0 {
 		return
 	}
 	keys := []string{
-		"Name",
-		"OriginalTitle",
 		"SortName",
 		"ForcedSortName",
-		"Overview",
 		"ShortOverview",
-		"Taglines",
-		"Genres",
-		"Studios",
-		"Tags",
-		"ProviderIds",
-		"OfficialRating",
 		"CustomRating",
-		"ProductionYear",
-		"PremiereDate",
 		"EndDate",
-		"CommunityRating",
 		"CriticRating",
 		"ProductionLocations",
-		"People",
 		"Status",
 		"DisplayOrder",
 		"AirDays",
 		"AirTime",
 	}
 	for _, key := range keys {
-		if value, ok := source[key]; ok && value != nil {
+		if value, ok := portableRawValue(source[key]); ok {
 			target[key] = value
 		}
 	}
+}
+
+func portableRawValue(value any) (any, bool) {
+	switch v := value.(type) {
+	case nil:
+		return nil, false
+	case string:
+		return v, strings.TrimSpace(v) != ""
+	case bool:
+		return v, true
+	case int, int64, float64, json.Number:
+		return v, true
+	case []string:
+		return v, len(v) > 0
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			switch scalar := item.(type) {
+			case string:
+				if strings.TrimSpace(scalar) != "" {
+					out = append(out, scalar)
+				}
+			case bool, int, int64, float64, json.Number:
+				out = append(out, scalar)
+			}
+		}
+		if len(out) == 0 {
+			return nil, false
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func portableNameIDs(values []emby.NameID) []map[string]string {
+	out := make([]map[string]string, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, map[string]string{"Name": name})
+	}
+	return out
 }
 
 func setIfNotEmpty(raw map[string]any, key, value string) {
@@ -1364,12 +1442,20 @@ func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, ex
 
 func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry) (emby.Item, []emby.Item, string, error) {
 	var firstSearchErr error
+	var firstAmbiguous []emby.Item
+	var firstAmbiguousReason string
 	rememberSearchErr := func(err error) {
 		if err != nil && firstSearchErr == nil {
 			firstSearchErr = err
 		}
 	}
-	if stem := mediaPathStem(entry.Path); stem != "" {
+	rememberAmbiguous := func(reason string, items []emby.Item) {
+		if firstAmbiguousReason == "" && len(items) > 0 {
+			firstAmbiguousReason = reason
+			firstAmbiguous = items
+		}
+	}
+	if stem := mediaPathStem(entry.Path); stem != "" && entry.Type != "Season" {
 		items, err := client.SearchItems(ctx, searchPrefix(stem, 30), entry.Type, 50)
 		if err == nil {
 			matches := mediaStemMatches(stem, entry.Type, items)
@@ -1377,7 +1463,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 				return matches[0], matches, "media-file", nil
 			}
 			if len(matches) > 1 {
-				return emby.Item{}, matches, "media-file-ambiguous", nil
+				rememberAmbiguous("media-file-ambiguous", matches)
 			}
 		} else {
 			rememberSearchErr(err)
@@ -1391,7 +1477,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 			return items[0], items, "provider-id", nil
 		}
 		if err == nil && len(items) > 1 {
-			return emby.Item{}, items, "provider-id-ambiguous", nil
+			rememberAmbiguous("provider-id-ambiguous", items)
 		}
 		if err != nil {
 			rememberSearchErr(err)
@@ -1405,7 +1491,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 				return matches[0], matches, "episode-number", nil
 			}
 			if len(matches) > 1 {
-				return emby.Item{}, matches, "episode-ambiguous", nil
+				rememberAmbiguous("episode-ambiguous", matches)
 			}
 		} else {
 			rememberSearchErr(err)
@@ -1419,7 +1505,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 				return matches[0], matches, "season-parent", nil
 			}
 			if len(matches) > 1 {
-				return emby.Item{}, matches, "season-parent-ambiguous", nil
+				rememberAmbiguous("season-parent-ambiguous", matches)
 			}
 		} else {
 			rememberSearchErr(err)
@@ -1433,10 +1519,10 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 				return item, matches, "name-exact", nil
 			}
 			if len(exact) > 0 {
-				return emby.Item{}, exact, "name-ambiguous", nil
+				rememberAmbiguous("name-ambiguous", exact)
 			}
 			if len(items) > 0 {
-				return emby.Item{}, items, "name-search-ambiguous", nil
+				rememberAmbiguous("name-search-ambiguous", items)
 			}
 		} else {
 			rememberSearchErr(err)
@@ -1451,9 +1537,9 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 				return item, matches, "short-name-exact", nil
 			}
 			if len(exact) > 0 {
-				return emby.Item{}, exact, "short-name-ambiguous", nil
+				rememberAmbiguous("short-name-ambiguous", exact)
 			}
-			return emby.Item{}, items, "short-name-search-ambiguous", nil
+			rememberAmbiguous("short-name-search-ambiguous", items)
 		} else if err != nil {
 			rememberSearchErr(err)
 		}
@@ -1466,12 +1552,15 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 				return item, matches, "original-title", nil
 			}
 			if len(exact) > 0 {
-				return emby.Item{}, exact, "original-title-ambiguous", nil
+				rememberAmbiguous("original-title-ambiguous", exact)
 			}
-			return emby.Item{}, items, "original-title-search-ambiguous", nil
+			rememberAmbiguous("original-title-search-ambiguous", items)
 		} else if err != nil {
 			rememberSearchErr(err)
 		}
+	}
+	if firstAmbiguousReason != "" {
+		return emby.Item{}, firstAmbiguous, firstAmbiguousReason, nil
 	}
 	if firstSearchErr != nil {
 		return emby.Item{}, nil, "search-error", firstSearchErr
