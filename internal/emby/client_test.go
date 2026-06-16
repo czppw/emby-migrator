@@ -327,6 +327,22 @@ func TestPersonLookupAndAvatarDownloadUseNameLookupThenTargetPersonIDForUpload(t
 		case "/emby/Persons/Keanu%20Reeves/Images/Primary":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write([]byte("png-bytes"))
+		case "/emby/Persons":
+			if got := r.URL.Query().Get("SearchTerm"); got != "Keanu Reeves" {
+				http.Error(w, "person search term = "+got, http.StatusBadRequest)
+				return
+			}
+			writeJSON(t, w, map[string]interface{}{
+				"Items": []map[string]interface{}{
+					{
+						"Name":            "Keanu Reeves",
+						"Id":              "target-person-id",
+						"ProviderIds":     map[string]string{"Imdb": "nm0000206"},
+						"PrimaryImageTag": "avatar-tag",
+					},
+				},
+				"TotalRecordCount": 1,
+			})
 		case "/emby/Items/target-person-id/Images/Primary":
 			if r.Method != http.MethodPost {
 				http.Error(w, "want POST", http.StatusMethodNotAllowed)
@@ -367,10 +383,115 @@ func TestPersonLookupAndAvatarDownloadUseNameLookupThenTargetPersonIDForUpload(t
 	if !reflect.DeepEqual(requested, []string{
 		"/emby/Persons/Keanu%20Reeves",
 		"/emby/Persons/Keanu%20Reeves/Images/Primary",
-		"/emby/Persons/Keanu%20Reeves",
+		"/emby/Persons",
 		"/emby/Items/target-person-id/Images/Primary",
 	}) {
-		t.Fatalf("person APIs should look up by name and upload by target person id, got requests %#v", requested)
+		t.Fatalf("person APIs should search by name and upload by target person id, got requests %#v", requested)
+	}
+}
+
+func TestUploadPersonImageUsesPersonsSearchToAvoidBrokenNameLookup(t *testing.T) {
+	var sawSearch bool
+	var uploaded bool
+	var directLookups int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Emby-Token") != testAPIKey {
+			http.Error(w, "missing X-Emby-Token", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.EscapedPath() {
+		case "/emby/Persons":
+			if got := r.URL.Query().Get("SearchTerm"); got != "Keanu Reeves" {
+				http.Error(w, "person search term = "+got, http.StatusBadRequest)
+				return
+			}
+			if got := r.URL.Query().Get("Fields"); !strings.Contains(got, "ProviderIds") || !strings.Contains(got, "ImageTags") {
+				http.Error(w, "person search missing fields "+got, http.StatusBadRequest)
+				return
+			}
+			sawSearch = true
+			writeJSON(t, w, map[string]interface{}{
+				"Items": []map[string]interface{}{
+					{"Name": "Keanu Reeves", "Id": "target-person-id"},
+				},
+				"TotalRecordCount": 1,
+			})
+		case "/emby/Persons/Keanu%20Reeves":
+			directLookups++
+			http.Error(w, "Object reference not set to an instance of an object.", http.StatusInternalServerError)
+		case "/emby/Items/target-person-id/Images/Primary":
+			if r.Method != http.MethodPost {
+				http.Error(w, "want POST", http.StatusMethodNotAllowed)
+				return
+			}
+			uploaded = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path "+r.URL.EscapedPath(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/emby", testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	if err := client.UploadPersonImage(context.Background(), "Keanu Reeves", []byte("new-avatar")); err != nil {
+		t.Fatalf("UploadPersonImage returned error: %v", err)
+	}
+	if !sawSearch || !uploaded {
+		t.Fatalf("UploadPersonImage should search people and upload by target id, sawSearch=%v uploaded=%v", sawSearch, uploaded)
+	}
+	if directLookups != 0 {
+		t.Fatalf("UploadPersonImage should avoid broken direct person lookup, directLookups=%d", directLookups)
+	}
+}
+
+func TestUploadPersonImageFallsBackToLegacyNameLookupWhenPersonsSearchFails(t *testing.T) {
+	var usedLegacyLookup bool
+	var uploaded bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Emby-Token") != testAPIKey {
+			http.Error(w, "missing X-Emby-Token", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.EscapedPath() {
+		case "/emby/Persons":
+			http.Error(w, "search endpoint unavailable", http.StatusNotFound)
+		case "/emby/Persons/Keanu%20Reeves":
+			usedLegacyLookup = true
+			writeJSON(t, w, map[string]interface{}{
+				"Name": "Keanu Reeves",
+				"Id":   "target-person-id",
+			})
+		case "/emby/Items/target-person-id/Images/Primary":
+			if r.Method != http.MethodPost {
+				http.Error(w, "want POST", http.StatusMethodNotAllowed)
+				return
+			}
+			uploaded = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path "+r.URL.EscapedPath(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/emby", testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	if err := client.UploadPersonImage(context.Background(), "Keanu Reeves", []byte("new-avatar")); err != nil {
+		t.Fatalf("UploadPersonImage returned error: %v", err)
+	}
+	if !usedLegacyLookup || !uploaded {
+		t.Fatalf("UploadPersonImage should fall back to legacy lookup and upload, usedLegacyLookup=%v uploaded=%v", usedLegacyLookup, uploaded)
 	}
 }
 

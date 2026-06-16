@@ -60,6 +60,11 @@ type ItemsResponse struct {
 	TotalRecordCount int    `json:"TotalRecordCount"`
 }
 
+type PersonsResponse struct {
+	Items            []Person `json:"Items"`
+	TotalRecordCount int      `json:"TotalRecordCount"`
+}
+
 type Library struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
@@ -619,6 +624,39 @@ func (c *Client) Person(ctx context.Context, name string) (Person, error) {
 	return person, err
 }
 
+func (c *Client) Persons(ctx context.Context, searchTerm string, limit int) ([]Person, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	params := url.Values{
+		"Fields": {"ProviderIds,ImageTags"},
+		"Limit":  {fmt.Sprintf("%d", limit)},
+	}
+	if strings.TrimSpace(searchTerm) != "" {
+		params.Set("SearchTerm", searchTerm)
+	}
+	var result PersonsResponse
+	err := c.JSON(ctx, http.MethodGet, "/Persons", params, nil, &result)
+	return result.Items, err
+}
+
+func (c *Client) FindPersonByName(ctx context.Context, name string) (Person, error) {
+	people, err := c.Persons(ctx, name, 20)
+	if err != nil {
+		return Person{}, err
+	}
+	name = strings.TrimSpace(name)
+	for _, person := range people {
+		if strings.EqualFold(strings.TrimSpace(person.Name), name) {
+			return person, nil
+		}
+	}
+	if len(people) == 1 {
+		return people[0], nil
+	}
+	return Person{}, fmt.Errorf("target person %q not found", name)
+}
+
 func (c *Client) Images(ctx context.Context, itemID string) ([]ImageInfo, error) {
 	var images []ImageInfo
 	err := c.JSON(ctx, http.MethodGet, "/Items/"+url.PathEscape(itemID)+"/Images", nil, nil, &images)
@@ -720,7 +758,14 @@ func (c *Client) UploadImage(ctx context.Context, itemID, imageType string, data
 }
 
 func (c *Client) UploadPersonImage(ctx context.Context, name string, data []byte) error {
-	person, err := c.Person(ctx, name)
+	person, err := c.FindPersonByName(ctx, name)
+	if err != nil || strings.TrimSpace(string(person.ID)) == "" {
+		searchErr := err
+		person, err = c.Person(ctx, name)
+		if err != nil && searchErr != nil {
+			return fmt.Errorf("find target person by name failed: search: %v; direct: %w", searchErr, err)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("find target person by name failed: %w", err)
 	}

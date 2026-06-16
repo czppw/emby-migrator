@@ -500,7 +500,13 @@ func TestMergeItemMetadataBuildsPortablePayloadWithoutOldInternalIDs(t *testing.
 			Taglines:        []string{"tagline"},
 			Studios:         []emby.NameID{{Name: "Old Studio", ID: "old-studio-id"}},
 			ProviderIDs:     map[string]string{"Tmdb": "123"},
-			People:          []emby.Person{{Name: "Actor One", ID: "old-person-id"}},
+			People: []emby.Person{{
+				Name:        "Actor One",
+				ID:          "old-person-id",
+				Type:        "Actor",
+				Role:        "Lead",
+				ProviderIDs: map[string]string{"Imdb": "nm0000001"},
+			}},
 			Raw: map[string]any{
 				"SortName": "Source Movie",
 				"People": []any{
@@ -526,8 +532,16 @@ func TestMergeItemMetadataBuildsPortablePayloadWithoutOldInternalIDs(t *testing.
 	if current.Raw["Id"] != "target-id" {
 		t.Fatalf("payload should keep target id, got %#v", current.Raw)
 	}
-	if _, ok := current.Raw["People"]; ok {
-		t.Fatalf("payload must not copy old People ids: %#v", current.Raw["People"])
+	people, ok := current.Raw["People"].([]map[string]any)
+	if !ok || len(people) != 1 || people[0]["Name"] != "Actor One" || people[0]["Role"] != "Lead" {
+		t.Fatalf("payload should keep portable people fields, got %#v", current.Raw["People"])
+	}
+	if _, ok := people[0]["Id"]; ok {
+		t.Fatalf("payload leaked old person id: %#v", people[0])
+	}
+	providers, ok := people[0]["ProviderIds"].(map[string]string)
+	if !ok || providers["Imdb"] != "nm0000001" {
+		t.Fatalf("payload should keep person provider ids, got %#v", people[0]["ProviderIds"])
 	}
 	studios, ok := current.Raw["Studios"].([]map[string]string)
 	if !ok || len(studios) != 1 || studios[0]["Name"] != "Old Studio" {

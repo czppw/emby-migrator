@@ -1293,6 +1293,9 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 	if studios := portableNameIDs(source.Studios); len(studios) > 0 {
 		payload["Studios"] = studios
 	}
+	if people := portablePeople(source.People); len(people) > 0 {
+		payload["People"] = people
+	}
 	if len(source.ProviderIDs) > 0 {
 		payload["ProviderIds"] = source.ProviderIDs
 	} else if len(current.ProviderIDs) > 0 {
@@ -1322,6 +1325,31 @@ func portableNameIDs(values []emby.NameID) []map[string]string {
 			continue
 		}
 		out = append(out, map[string]string{"Name": name})
+	}
+	return out
+}
+
+func portablePeople(values []emby.Person) []map[string]any {
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value.Name)
+		if name == "" {
+			continue
+		}
+		person := map[string]any{
+			"Name":        name,
+			"ProviderIds": map[string]string{},
+		}
+		if typ := strings.TrimSpace(value.Type); typ != "" {
+			person["Type"] = typ
+		}
+		if role := strings.TrimSpace(value.Role); role != "" {
+			person["Role"] = role
+		}
+		if len(value.ProviderIDs) > 0 {
+			person["ProviderIds"] = value.ProviderIDs
+		}
+		out = append(out, person)
 	}
 	return out
 }
