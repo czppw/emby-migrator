@@ -6,3 +6,4 @@
 server.exe*
 PROJECT_NOTES.md
 .gocache/
+.local-run/

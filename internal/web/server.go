@@ -77,6 +77,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /api/exports", s.requireAuth(http.HandlerFunc(s.handleExports)))
 	mux.Handle("POST /api/jobs/export", s.requireAuth(http.HandlerFunc(s.handleExportJob)))
 	mux.Handle("POST /api/jobs/import", s.requireAuth(http.HandlerFunc(s.handleImportJob)))
+	mux.Handle("POST /api/jobs/import/precheck", s.requireAuth(http.HandlerFunc(s.handleImportPrecheckJob)))
 	mux.Handle("GET /api/jobs/{id}", s.requireAuth(http.HandlerFunc(s.handleJob)))
 	mux.Handle("POST /api/jobs/{id}/stop", s.requireAuth(http.HandlerFunc(s.handleStopJob)))
 	mux.Handle("GET /api/jobs/{id}/logs", s.requireAuth(http.HandlerFunc(s.handleJobLogs)))
@@ -168,6 +169,14 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImportJob(w http.ResponseWriter, r *http.Request) {
+	s.startImportJob(w, r, false)
+}
+
+func (s *Server) handleImportPrecheckJob(w http.ResponseWriter, r *http.Request) {
+	s.startImportJob(w, r, true)
+}
+
+func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDryRun bool) {
 	var req importRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -176,10 +185,19 @@ func (s *Server) handleImportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath is required"))
 		return
 	}
-	j := s.jobs.Create("import")
+	if forceDryRun {
+		req.DryRun = true
+	}
+	jobType := "import"
+	startMessage := "开始导入任务"
+	if req.DryRun {
+		jobType = "import-precheck"
+		startMessage = "开始导入预检任务"
+	}
+	j := s.jobs.Create(jobType)
 	go func() {
 		j.Start()
-		j.Log("info", "开始导入任务")
+		j.Log("info", startMessage)
 		result, err := s.exporter.Import(j.Context(), j, exporter.ImportRequest{
 			Connection:          emby.Connection{BaseURL: req.BaseURL, APIKey: req.APIKey},
 			ExportPath:          filepath.Clean(req.ExportPath),

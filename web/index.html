@@ -206,8 +206,8 @@
         <section class="panel import-panel" aria-labelledby="importTitle">
           <div class="panel-heading with-action">
             <div>
-              <h2 id="importTitle">导入验证</h2>
-              <p>选择已有导出包或手动输入目录，用 dry-run 验证迁移适配性。</p>
+              <h2 id="importTitle">导入预检与导入</h2>
+              <p>先预检匹配结果，确认后再正式写入目标 Emby。</p>
             </div>
             <button type="button" class="button small" id="refreshExportsBtn">
               刷新导出包
@@ -242,14 +242,6 @@
                 <strong>元数据</strong>
                 <small class="option-code">metadata</small>
                 <small>始终读取导出包中的元数据并参与匹配/写入。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="importDryRun" checked />
-              <span>
-                <strong>仅验证</strong>
-                <small class="option-code">dry-run</small>
-                <small>只匹配并生成报告，不写入 Emby。</small>
               </span>
             </label>
             <label class="option">
@@ -292,12 +284,16 @@
           </fieldset>
 
           <div class="actions task-actions">
+            <button type="button" class="button" id="startPrecheckBtn" disabled>
+              预检匹配
+            </button>
             <button type="button" class="button primary" id="startImportBtn" disabled>
               开始导入
             </button>
           </div>
 
           <div class="notice is-hidden" id="importNotice" role="status" aria-live="polite"></div>
+          <div class="import-report is-hidden" id="importReport" aria-live="polite"></div>
         </section>
 
         <section class="panel status-panel" aria-labelledby="statusTitle">

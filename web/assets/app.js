@@ -116,13 +116,14 @@
       "refreshExportsBtn",
       "exportsSelect",
       "importPath",
-      "importDryRun",
       "importSkipImages",
       "importOverwrite",
       "importIncludePeopleImages",
       "importConcurrency",
+      "startPrecheckBtn",
       "startImportBtn",
       "importNotice",
+      "importReport",
       "logSummary",
       "downloadLogsBtn",
       "copyLogsBtn",
@@ -147,6 +148,7 @@
     els.refreshExportsBtn.addEventListener("click", handleRefreshExports);
     els.exportsSelect.addEventListener("change", handleExportSelection);
     els.importPath.addEventListener("input", updateControls);
+    els.startPrecheckBtn.addEventListener("click", handleStartPrecheck);
     els.startImportBtn.addEventListener("click", handleStartImport);
     els.downloadLogsBtn.addEventListener("click", handleDownloadLogs);
     els.copyLogsBtn.addEventListener("click", handleCopyLogs);
@@ -469,14 +471,38 @@
     }
   }
 
+  async function handleStartPrecheck() {
+    await startImportLikeJob({
+      endpoint: "/api/jobs/import/precheck",
+      buttonKey: "startPrecheck",
+      button: els.startPrecheckBtn,
+      busyText: "预检中",
+      dryRun: true,
+      kind: "导入预检",
+      actionName: "导入预检",
+    });
+  }
+
   async function handleStartImport() {
+    await startImportLikeJob({
+      endpoint: "/api/jobs/import",
+      buttonKey: "startImport",
+      button: els.startImportBtn,
+      busyText: "创建中",
+      dryRun: false,
+      kind: "导入",
+      actionName: "导入",
+    });
+  }
+
+  async function startImportLikeJob({ endpoint, buttonKey, button, busyText, dryRun, kind, actionName }) {
     const exportPath = els.importPath.value.trim();
     if (!state.connected || !exportPath) {
       setNotice(els.importNotice, "请先连接目标 Emby，并选择或输入导出包。", "error");
       return;
     }
 
-    const options = collectImportOptions();
+    const options = collectImportOptions({ dryRun });
     const connection = getConnection();
     const payload = {
       connection,
@@ -488,29 +514,26 @@
       ...options,
     };
 
-    setButtonBusy("startImport", els.startImportBtn, true, "创建中");
+    clearImportReport();
+    setButtonBusy(buttonKey, button, true, busyText);
 
     try {
-      const data = await postJson("/api/jobs/import", payload);
+      const data = await postJson(endpoint, payload);
       const jobId = readJobId(data);
       if (!jobId) {
         throw new Error("后端未返回任务 ID。");
       }
 
-      beginJob(jobId, options.dryRun ? "导入 dry-run" : "导入", data);
-      setNotice(
-        els.importNotice,
-        `${options.dryRun ? "导入 dry-run" : "导入"}任务已创建：${jobId}`,
-        "ok",
-      );
+      beginJob(jobId, kind, data);
+      setNotice(els.importNotice, `${actionName}任务已创建：${jobId}`, "ok");
       appendSystemLog(
-        `${options.dryRun ? "导入 dry-run" : "导入"}任务已创建：${jobId}。导出包 ${exportPath}，图片类型 ${formatImageOptions(options)}。`,
+        `${actionName}任务已创建：${jobId}。导出包 ${exportPath}，图片类型 ${formatImageOptions(options)}。`,
       );
     } catch (error) {
-      setNotice(els.importNotice, `创建导入任务失败：${error.message}`, "error");
-      appendSystemLog(`创建导入任务失败：${error.message}`);
+      setNotice(els.importNotice, `创建${actionName}任务失败：${error.message}`, "error");
+      appendSystemLog(`创建${actionName}任务失败：${error.message}`);
     } finally {
-      setButtonBusy("startImport", els.startImportBtn, false);
+      setButtonBusy(buttonKey, button, false);
       updateControls();
     }
   }
@@ -585,10 +608,10 @@
     };
   }
 
-  function collectImportOptions() {
+  function collectImportOptions({ dryRun = false } = {}) {
     const skipImages = els.importSkipImages.checked;
     return {
-      dryRun: els.importDryRun.checked,
+      dryRun,
       skipImages,
       overwrite: els.importOverwrite.checked,
       includePeopleImages: !skipImages && els.importIncludePeopleImages.checked,
@@ -866,6 +889,8 @@
     els.refreshJobBtn.disabled = locked || !state.currentJobId || state.busy.has("refreshJob");
     els.stopJobBtn.disabled = locked || !hasActiveJob || state.busy.has("stopJob");
     els.downloadLogsBtn.disabled = locked || !state.currentJobId;
+    els.startPrecheckBtn.disabled =
+      locked || !state.connected || !hasImportPath || state.busy.has("startPrecheck");
     els.startImportBtn.disabled =
       locked || !state.connected || !hasImportPath || state.busy.has("startImport");
 
@@ -887,6 +912,7 @@
     state.currentJobId = String(jobId);
     state.currentJobKind = kind;
     state.seenLogLines.clear();
+    clearImportReport();
     closeLogStream();
     stopPolling();
     renderJobStatus({ ...safeObject(initialData), id: jobId, status: "queued" }, kind);
@@ -1001,7 +1027,134 @@
     els.jobId.textContent = jobId;
     els.jobProgress.textContent = formatProgress(data);
     state.currentJobStatus = normalizeStatus(status);
+    renderImportReport(data, kind);
     updateControls();
+  }
+
+  function renderImportReport(data, kind) {
+    if (!els.importReport) {
+      return;
+    }
+    const report = readImportReport(data);
+    if (!report) {
+      if (isImportKind(kind)) {
+        els.importReport.classList.add("is-hidden");
+      }
+      return;
+    }
+
+    const summary = safeObject(readFirst(report, ["summary", "Summary"]));
+    const matches = Array.isArray(report.matches) ? report.matches : [];
+    const dryRun = Boolean(readFirst(report, ["dryRun", "DryRun"]));
+    const total = matches.length || numberValue(summary.items);
+    const matched = numberValue(summary.matched);
+    const unmatched = numberValue(summary.unmatched);
+    const ambiguous = numberValue(summary.ambiguous);
+    const errors = numberValue(summary.errors);
+    const metadataUpdated = numberValue(summary.metadataUpdated);
+    const itemImagesPushed = numberValue(summary.itemImagesPushed);
+    const itemImagesFailed = numberValue(summary.itemImagesFailed);
+    const peopleImages = numberValue(summary.peopleImages);
+    const peopleImagesFailed = numberValue(summary.peopleImagesFailed);
+    const hasRisk = unmatched > 0 || ambiguous > 0 || errors > 0 || itemImagesFailed > 0 || peopleImagesFailed > 0;
+
+    els.importReport.textContent = "";
+    els.importReport.className = `import-report ${hasRisk ? "risk" : "ok"}`;
+
+    const heading = document.createElement("div");
+    heading.className = "report-heading";
+    const title = document.createElement("strong");
+    title.textContent = dryRun ? "导入预检结果" : "导入结果";
+    const hint = document.createElement("span");
+    hint.textContent = dryRun
+      ? hasRisk
+        ? "存在未匹配、歧义或错误，建议处理后再正式导入。"
+        : "匹配结果正常，可以进行正式导入。"
+      : hasRisk
+        ? "导入完成，但存在需要复查的问题。"
+        : "导入完成，未发现异常统计。";
+    heading.append(title, hint);
+    els.importReport.appendChild(heading);
+
+    const stats = document.createElement("div");
+    stats.className = "report-stats";
+    addReportStat(stats, "项目", total);
+    addReportStat(stats, dryRun ? "匹配" : "元数据成功", dryRun ? matched : metadataUpdated);
+    addReportStat(stats, "未匹配", unmatched);
+    addReportStat(stats, "歧义", ambiguous);
+    addReportStat(stats, "错误", errors);
+    if (!dryRun) {
+      addReportStat(stats, "媒体图片", `${itemImagesPushed}/${itemImagesFailed}`);
+      addReportStat(stats, "人物头像", `${peopleImages}/${peopleImagesFailed}`);
+    }
+    els.importReport.appendChild(stats);
+
+    const samples = reportProblemSamples(matches);
+    if (samples.length) {
+      const list = document.createElement("div");
+      list.className = "report-samples";
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = "需复查示例";
+      list.appendChild(label);
+      samples.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "report-sample";
+        const name = document.createElement("strong");
+        name.textContent = item.sourceName || item.stableKey || "未知项目";
+        const detail = document.createElement("span");
+        detail.textContent = [item.status, item.reason || item.error, formatCandidates(item.candidates)]
+          .filter(Boolean)
+          .join(" · ");
+        row.append(name, detail);
+        list.appendChild(row);
+      });
+      els.importReport.appendChild(list);
+    }
+  }
+
+  function clearImportReport() {
+    if (!els.importReport) {
+      return;
+    }
+    els.importReport.textContent = "";
+    els.importReport.className = "import-report is-hidden";
+  }
+
+  function readImportReport(data) {
+    const result = safeObject(readFirst(data, ["result", "Result"]));
+    return readFirst(result, ["report", "Report"]) || readFirst(data, ["report", "Report"]) || null;
+  }
+
+  function isImportKind(kind) {
+    return String(kind || "").toLowerCase().includes("import") || String(kind || "").includes("导入");
+  }
+
+  function addReportStat(parent, label, value) {
+    const item = document.createElement("div");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const number = document.createElement("strong");
+    number.textContent = String(value ?? 0);
+    item.append(name, number);
+    parent.appendChild(item);
+  }
+
+  function reportProblemSamples(matches) {
+    return matches
+      .filter((item) => {
+        const status = String(item.status || "").toLowerCase();
+        return status && status !== "matched" && status !== "updated";
+      })
+      .slice(0, 6);
+  }
+
+  function formatCandidates(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return "";
+    }
+    const preview = candidates.slice(0, 3).join("、");
+    return candidates.length > 3 ? `候选：${preview} 等 ${candidates.length} 个` : `候选：${preview}`;
   }
 
   function closeLogStream() {
@@ -1218,6 +1371,11 @@
     return String(value || "")
       .toLowerCase()
       .trim();
+  }
+
+  function numberValue(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
   }
 
   function readFirst(object, keys) {

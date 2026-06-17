@@ -590,6 +590,86 @@ h2 {
   padding-top: 16px;
 }
 
+.import-report {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.import-report.ok {
+  border-color: color-mix(in srgb, var(--ok), var(--border) 48%);
+}
+
+.import-report.risk {
+  border-color: color-mix(in srgb, var(--warning), var(--border) 38%);
+}
+
+.report-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.report-heading strong {
+  font-size: 15px;
+}
+
+.report-heading span,
+.report-sample span {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.report-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.report-stats > div {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.report-stats span,
+.report-stats strong {
+  display: block;
+}
+
+.report-stats span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.report-stats strong {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.report-samples {
+  display: grid;
+  gap: 7px;
+}
+
+.report-sample {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.report-sample strong {
+  overflow-wrap: anywhere;
+}
+
 .image-type-panel {
   margin: 14px 0 0;
   padding: 12px;

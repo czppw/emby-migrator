@@ -81,17 +81,24 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 	}
 
 	var dryRunCreate map[string]any
-	postJSON(t, client, app.URL+"/api/jobs/import", map[string]any{
+	postJSON(t, client, app.URL+"/api/jobs/import/precheck", map[string]any{
 		"baseUrl":             mockEmby.URL,
 		"apiKey":              "test-key",
 		"exportPath":          filepath.Base(exportPath),
-		"dryRun":              true,
+		"dryRun":              false,
 		"includePeopleImages": true,
 		"imageTypes":          []string{"Logo"},
 	}, &dryRunCreate, http.StatusAccepted)
-	waitForJob(t, client, app.URL, stringField(t, dryRunCreate, "id"))
+	dryRunJob := waitForJob(t, client, app.URL, stringField(t, dryRunCreate, "id"))
+	if got := stringField(t, dryRunJob, "type"); got != "import-precheck" {
+		t.Fatalf("precheck job type = %q, want import-precheck", got)
+	}
+	dryRunReport := objectField(t, objectField(t, dryRunJob, "result"), "report")
+	if got := boolField(t, dryRunReport, "dryRun"); !got {
+		t.Fatalf("precheck report dryRun = false, want true")
+	}
 	if got := mockState.writeCounts(); got != "updates=0 itemImages=0 peopleImages=0" {
-		t.Fatalf("dry-run wrote to mock Emby: %s", got)
+		t.Fatalf("precheck wrote to mock Emby: %s", got)
 	}
 
 	var importCreate map[string]any
@@ -345,6 +352,15 @@ func intField(t *testing.T, object map[string]any, key string) int {
 		t.Fatalf("field %s is not a number in %#v", key, object)
 	}
 	return int(value)
+}
+
+func boolField(t *testing.T, object map[string]any, key string) bool {
+	t.Helper()
+	value, ok := object[key].(bool)
+	if !ok {
+		t.Fatalf("field %s is not a bool in %#v", key, object)
+	}
+	return value
 }
 
 func writeSmokeJSON(w http.ResponseWriter, payload any) {
