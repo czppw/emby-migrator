@@ -534,6 +534,51 @@ func TestFindMatchUsesEpisodePatternFromPathWhenIndexesAreMissing(t *testing.T) 
 	}
 }
 
+func TestFindMatchUsesEpisodePathSeriesWhenEpisodeNamesCollide(t *testing.T) {
+	client := newFindMatchTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		writeExporterJSON(t, w, map[string]any{
+			"Items": []map[string]any{
+				{
+					"Id":                "target-moving-episode-4",
+					"Type":              "Episode",
+					"Name":              "秘密",
+					"Path":              `/new/日韩剧集/超异能族 (2023) {tmdb-126485}/Season 1/超异能族.2023.S01E04.strm`,
+					"IndexNumber":       4,
+					"ParentIndexNumber": 1,
+				},
+				{
+					"Id":                "target-bet-episode-5",
+					"Type":              "Episode",
+					"Name":              "秘密",
+					"Path":              `/new/日韩剧集/赌金 (2026) {tmdb-278113}/Season 1/赌金.2026.S01E05.strm`,
+					"IndexNumber":       5,
+					"ParentIndexNumber": 1,
+				},
+			},
+			"TotalRecordCount": 2,
+		})
+	})
+
+	target, candidates, reason, err := FindMatch(context.Background(), client, storage.ItemEntry{
+		Type:              "Episode",
+		Name:              "秘密",
+		SeriesName:        "赌金",
+		Path:              `/old/日韩剧集/赌金 (2026) {tmdb-278113}/Season 1/赌金.2026.S01E05.第5集.strm`,
+		IndexNumber:       5,
+		ParentIndexNumber: 1,
+	})
+	if err != nil {
+		t.Fatalf("FindMatch returned error: %v", err)
+	}
+	if target.ID != "target-bet-episode-5" || reason != "episode-number" || len(candidates) != 1 {
+		t.Fatalf("FindMatch should use episode path series before name fallback: target=%#v reason=%q candidates=%#v", target, reason, candidates)
+	}
+}
+
 func TestFindMatchPrefersMediaFileStem(t *testing.T) {
 	client := newFindMatchTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("SearchTerm"); got != "寄生虫 (2019) - 2160p.HDR10.H.265" {

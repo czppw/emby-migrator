@@ -1982,6 +1982,15 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 	if strings.TrimSpace(entry.Name) != "" {
 		items, err := cache.searchItems(ctx, client, entry.Name, entry.Type, 20)
 		if err == nil {
+			if entry.Type == "Episode" {
+				matches := episodeMatches(entry, items)
+				if len(matches) == 1 {
+					return matches[0], matches, "episode-number", nil
+				}
+				if len(matches) > 1 {
+					rememberAmbiguous("episode-ambiguous", matches)
+				}
+			}
 			exact := exactNameMatches(items, entry.Name, entry.Type)
 			if item, matches, ok := chooseUniqueMatch(exact, entry.ProductionYear); ok {
 				return item, matches, "name-exact", nil
@@ -2069,9 +2078,15 @@ func episodeMatches(entry storage.ItemEntry, items []emby.Item) []emby.Item {
 	if !ok {
 		return nil
 	}
+	sourceSeries := normalizedSeasonSeriesCandidates(entry.SeriesName, entry.Path)
 	matches := make([]emby.Item, 0)
 	for _, item := range items {
-		if item.SeriesName != entry.SeriesName {
+		targetSeries := normalizedSeasonSeriesCandidates(item.SeriesName, item.Path)
+		if len(sourceSeries) > 0 {
+			if len(targetSeries) == 0 || !stringSetsOverlap(sourceSeries, targetSeries) {
+				continue
+			}
+		} else if item.SeriesName != entry.SeriesName {
 			continue
 		}
 		target, ok := episodeNumberFromItem(item)
