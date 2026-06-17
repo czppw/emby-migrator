@@ -148,6 +148,7 @@ docker run -d \
 4. 确认可回滚版本仍能完成导入。
 
 当前首选回滚基线见 `docs/PROJECT_BLUEPRINT.md` 的“已知回滚点”。
+具体回滚命令和验证步骤见 `docs/ROLLBACK.md`。
 
 ## 8. 完成门槛
 
