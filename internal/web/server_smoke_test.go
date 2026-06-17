@@ -22,164 +22,200 @@ import (
 )
 
 func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
-	mockState := &mockEmbyState{}
-	mockEmby := newMockEmbyServer(mockState)
-	defer mockEmby.Close()
-
-	dataDir := t.TempDir()
-	app := httptest.NewServer(NewServer(
-		config.Config{
-			DataDir:       dataDir,
-			Version:       "smoke-test",
-			AdminPassword: "pw",
-			SessionSecret: "test-session-secret",
+	tests := []struct {
+		name              string
+		options           mockEmbyOptions
+		wantProfile       string
+		wantStrictRejects int
+		wantStudios       bool
+	}{
+		{
+			name:        "emby-4.8-classic",
+			options:     mockEmbyOptions{version: "4.8.11.0"},
+			wantProfile: "emby-4.8-classic",
+			wantStudios: true,
 		},
-		job.NewManager(),
-		exporter.NewService(dataDir),
-	).Routes())
-	defer app.Close()
+		{
+			name: "emby-4.9-strict",
+			options: mockEmbyOptions{
+				version:        "4.9.5.0",
+				strictMetadata: true,
+				personSearch:   true,
+			},
+			wantProfile:       "emby-4.9-strict",
+			wantStrictRejects: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockState := &mockEmbyState{}
+			mockEmby := newMockEmbyServerWithOptions(mockState, tt.options)
+			defer mockEmby.Close()
 
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := app.Client()
-	client.Jar = jar
+			dataDir := t.TempDir()
+			app := httptest.NewServer(NewServer(
+				config.Config{
+					DataDir:       dataDir,
+					Version:       "smoke-test",
+					AdminPassword: "pw",
+					SessionSecret: "test-session-secret",
+				},
+				job.NewManager(),
+				exporter.NewService(dataDir),
+			).Routes())
+			defer app.Close()
 
-	var health map[string]any
-	getJSON(t, client, app.URL+"/api/health", &health, http.StatusOK)
-	if health["ok"] != true || stringField(t, health, "toolVersion") != "smoke-test" {
-		t.Fatalf("unexpected health response: %#v", health)
-	}
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := app.Client()
+			client.Jar = jar
 
-	postJSON(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, nil, http.StatusOK)
+			var health map[string]any
+			getJSON(t, client, app.URL+"/api/health", &health, http.StatusOK)
+			if health["ok"] != true || stringField(t, health, "toolVersion") != "smoke-test" {
+				t.Fatalf("unexpected health response: %#v", health)
+			}
 
-	var connection map[string]any
-	postJSON(t, client, app.URL+"/api/connection/test", map[string]any{
-		"baseUrl": mockEmby.URL,
-		"apiKey":  "test-key",
-	}, &connection, http.StatusOK)
-	if connection["ok"] != true {
-		t.Fatalf("connection test did not return ok: %#v", connection)
-	}
+			postJSON(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, nil, http.StatusOK)
 
-	var libraries map[string][]map[string]any
-	postJSON(t, client, app.URL+"/api/libraries", map[string]any{
-		"baseUrl": mockEmby.URL,
-		"apiKey":  "test-key",
-	}, &libraries, http.StatusOK)
-	if len(libraries["libraries"]) != 1 || libraries["libraries"][0]["id"] != "lib-movies" {
-		t.Fatalf("unexpected libraries response: %#v", libraries)
-	}
+			var connection map[string]any
+			postJSON(t, client, app.URL+"/api/connection/test", map[string]any{
+				"baseUrl": mockEmby.URL,
+				"apiKey":  "test-key",
+			}, &connection, http.StatusOK)
+			if connection["ok"] != true {
+				t.Fatalf("connection test did not return ok: %#v", connection)
+			}
 
-	var exportCreate map[string]any
-	postJSON(t, client, app.URL+"/api/jobs/export", map[string]any{
-		"baseUrl":             mockEmby.URL,
-		"apiKey":              "test-key",
-		"libraryIds":          []string{"lib-movies"},
-		"includePeopleImages": true,
-		"imageTypes":          []string{"Primary", "Logo"},
-	}, &exportCreate, http.StatusAccepted)
-	exportJob := waitForJob(t, client, app.URL, stringField(t, exportCreate, "id"))
-	exportPath := stringField(t, objectField(t, exportJob, "result"), "path")
-	if _, err := os.Stat(filepath.Join(exportPath, "manifest.json")); err != nil {
-		t.Fatalf("export manifest was not written: %v", err)
-	}
+			var libraries map[string][]map[string]any
+			postJSON(t, client, app.URL+"/api/libraries", map[string]any{
+				"baseUrl": mockEmby.URL,
+				"apiKey":  "test-key",
+			}, &libraries, http.StatusOK)
+			if len(libraries["libraries"]) != 1 || libraries["libraries"][0]["id"] != "lib-movies" {
+				t.Fatalf("unexpected libraries response: %#v", libraries)
+			}
 
-	var dryRunCreate map[string]any
-	postJSON(t, client, app.URL+"/api/jobs/import/precheck", map[string]any{
-		"baseUrl":             mockEmby.URL,
-		"apiKey":              "test-key",
-		"exportPath":          filepath.Base(exportPath),
-		"dryRun":              false,
-		"includePeopleImages": true,
-		"imageTypes":          []string{"Logo"},
-	}, &dryRunCreate, http.StatusAccepted)
-	dryRunJob := waitForJob(t, client, app.URL, stringField(t, dryRunCreate, "id"))
-	if got := stringField(t, dryRunJob, "type"); got != "import-precheck" {
-		t.Fatalf("precheck job type = %q, want import-precheck", got)
-	}
-	dryRunReport := objectField(t, objectField(t, dryRunJob, "result"), "report")
-	if got := boolField(t, dryRunReport, "dryRun"); !got {
-		t.Fatalf("precheck report dryRun = false, want true")
-	}
-	compatibility := objectField(t, dryRunReport, "compatibility")
-	if got := stringField(t, compatibility, "name"); got != "emby-4.8-classic" {
-		t.Fatalf("compatibility profile = %q, want emby-4.8-classic", got)
-	}
-	if got := mockState.writeCounts(); got != "updates=0 itemImages=0 peopleImages=0" {
-		t.Fatalf("precheck wrote to mock Emby: %s", got)
-	}
+			var exportCreate map[string]any
+			postJSON(t, client, app.URL+"/api/jobs/export", map[string]any{
+				"baseUrl":             mockEmby.URL,
+				"apiKey":              "test-key",
+				"libraryIds":          []string{"lib-movies"},
+				"includePeopleImages": true,
+				"imageTypes":          []string{"Primary", "Logo"},
+			}, &exportCreate, http.StatusAccepted)
+			exportJob := waitForJob(t, client, app.URL, stringField(t, exportCreate, "id"))
+			exportPath := stringField(t, objectField(t, exportJob, "result"), "path")
+			if _, err := os.Stat(filepath.Join(exportPath, "manifest.json")); err != nil {
+				t.Fatalf("export manifest was not written: %v", err)
+			}
 
-	var reportsResponse map[string][]map[string]any
-	getJSON(t, client, app.URL+"/api/import-reports?exportPath="+filepath.Base(exportPath), &reportsResponse, http.StatusOK)
-	if len(reportsResponse["reports"]) != 1 {
-		t.Fatalf("reports response = %#v, want one report", reportsResponse)
-	}
-	reportName := stringField(t, reportsResponse["reports"][0], "name")
-	if !strings.HasPrefix(reportName, "import-report-") || !strings.HasSuffix(reportName, ".json") {
-		t.Fatalf("unexpected report name %q", reportName)
-	}
-	if got := boolField(t, reportsResponse["reports"][0], "dryRun"); !got {
-		t.Fatalf("precheck report listing dryRun = false, want true")
-	}
-	downloadURL := app.URL + "/api/import-reports/download?exportPath=" + filepath.Base(exportPath) + "&name=" + reportName
-	resp, err := client.Get(downloadURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	downloaded, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("download report status = %d, body=%s", resp.StatusCode, downloaded)
-	}
-	if got := resp.Header.Get("Content-Disposition"); !strings.Contains(got, reportName) {
-		t.Fatalf("download disposition = %q, want report filename", got)
-	}
-	var downloadedReport map[string]any
-	if err := json.Unmarshal(downloaded, &downloadedReport); err != nil {
-		t.Fatalf("downloaded report is not JSON: %v\n%s", err, downloaded)
-	}
-	if got := boolField(t, downloadedReport, "dryRun"); !got {
-		t.Fatalf("downloaded report dryRun = false, want true")
-	}
-	getJSON(t, client, app.URL+"/api/import-reports?exportPath=..%2f..", nil, http.StatusBadRequest)
-	getJSON(t, client, app.URL+"/api/import-reports/download?exportPath="+filepath.Base(exportPath)+"&name=manifest.json", nil, http.StatusBadRequest)
+			var dryRunCreate map[string]any
+			postJSON(t, client, app.URL+"/api/jobs/import/precheck", map[string]any{
+				"baseUrl":             mockEmby.URL,
+				"apiKey":              "test-key",
+				"exportPath":          filepath.Base(exportPath),
+				"dryRun":              false,
+				"includePeopleImages": true,
+				"imageTypes":          []string{"Logo"},
+			}, &dryRunCreate, http.StatusAccepted)
+			dryRunJob := waitForJob(t, client, app.URL, stringField(t, dryRunCreate, "id"))
+			if got := stringField(t, dryRunJob, "type"); got != "import-precheck" {
+				t.Fatalf("precheck job type = %q, want import-precheck", got)
+			}
+			dryRunReport := objectField(t, objectField(t, dryRunJob, "result"), "report")
+			if got := boolField(t, dryRunReport, "dryRun"); !got {
+				t.Fatalf("precheck report dryRun = false, want true")
+			}
+			compatibility := objectField(t, dryRunReport, "compatibility")
+			if got := stringField(t, compatibility, "name"); got != tt.wantProfile {
+				t.Fatalf("compatibility profile = %q, want %s", got, tt.wantProfile)
+			}
+			if got := mockState.writeCounts(); got != "updates=0 itemImages=0 peopleImages=0" {
+				t.Fatalf("precheck wrote to mock Emby: %s", got)
+			}
 
-	var importCreate map[string]any
-	postJSON(t, client, app.URL+"/api/jobs/import", map[string]any{
-		"baseUrl":             mockEmby.URL,
-		"apiKey":              "test-key",
-		"exportPath":          filepath.Base(exportPath),
-		"dryRun":              false,
-		"includePeopleImages": true,
-		"imageTypes":          []string{"Logo"},
-	}, &importCreate, http.StatusAccepted)
-	importJob := waitForJob(t, client, app.URL, stringField(t, importCreate, "id"))
-	importSummary := objectField(t, objectField(t, objectField(t, importJob, "result"), "report"), "summary")
-	if intField(t, importSummary, "metadataUpdated") != 1 {
-		t.Fatalf("metadataUpdated summary = %#v, want 1", importSummary)
-	}
-	if intField(t, importSummary, "itemImagesPushed") != 1 {
-		t.Fatalf("itemImagesPushed summary = %#v, want 1", importSummary)
-	}
-	if intField(t, importSummary, "peopleImages") != 1 {
-		t.Fatalf("peopleImages summary = %#v, want 1", importSummary)
-	}
+			var reportsResponse map[string][]map[string]any
+			getJSON(t, client, app.URL+"/api/import-reports?exportPath="+filepath.Base(exportPath), &reportsResponse, http.StatusOK)
+			if len(reportsResponse["reports"]) != 1 {
+				t.Fatalf("reports response = %#v, want one report", reportsResponse)
+			}
+			reportName := stringField(t, reportsResponse["reports"][0], "name")
+			if !strings.HasPrefix(reportName, "import-report-") || !strings.HasSuffix(reportName, ".json") {
+				t.Fatalf("unexpected report name %q", reportName)
+			}
+			if got := boolField(t, reportsResponse["reports"][0], "dryRun"); !got {
+				t.Fatalf("precheck report listing dryRun = false, want true")
+			}
+			downloadURL := app.URL + "/api/import-reports/download?exportPath=" + filepath.Base(exportPath) + "&name=" + reportName
+			resp, err := client.Get(downloadURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			downloaded, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("download report status = %d, body=%s", resp.StatusCode, downloaded)
+			}
+			if got := resp.Header.Get("Content-Disposition"); !strings.Contains(got, reportName) {
+				t.Fatalf("download disposition = %q, want report filename", got)
+			}
+			var downloadedReport map[string]any
+			if err := json.Unmarshal(downloaded, &downloadedReport); err != nil {
+				t.Fatalf("downloaded report is not JSON: %v\n%s", err, downloaded)
+			}
+			if got := boolField(t, downloadedReport, "dryRun"); !got {
+				t.Fatalf("downloaded report dryRun = false, want true")
+			}
+			getJSON(t, client, app.URL+"/api/import-reports?exportPath=..%2f..", nil, http.StatusBadRequest)
+			getJSON(t, client, app.URL+"/api/import-reports/download?exportPath="+filepath.Base(exportPath)+"&name=manifest.json", nil, http.StatusBadRequest)
 
-	mockState.mu.Lock()
-	defer mockState.mu.Unlock()
-	if len(mockState.updateBodies) != 1 {
-		t.Fatalf("metadata update count = %d, want 1", len(mockState.updateBodies))
-	}
-	if got := fmt.Sprint(mockState.updateBodies[0]["Overview"]); got != "Source overview" {
-		t.Fatalf("metadata update did not carry source overview: %#v", mockState.updateBodies[0])
-	}
-	if got, want := mockState.itemImageUploads, []string{"/Items/new-movie-1/Images/Logo"}; !slices.Equal(got, want) {
-		t.Fatalf("item image uploads = %#v, want %#v", got, want)
-	}
-	if got, want := mockState.personImageUploads, []string{"/Items/6384/Images/Primary"}; !slices.Equal(got, want) {
-		t.Fatalf("person image uploads = %#v, want %#v", got, want)
+			var importCreate map[string]any
+			postJSON(t, client, app.URL+"/api/jobs/import", map[string]any{
+				"baseUrl":             mockEmby.URL,
+				"apiKey":              "test-key",
+				"exportPath":          filepath.Base(exportPath),
+				"dryRun":              false,
+				"includePeopleImages": true,
+				"imageTypes":          []string{"Logo"},
+			}, &importCreate, http.StatusAccepted)
+			importJob := waitForJob(t, client, app.URL, stringField(t, importCreate, "id"))
+			importSummary := objectField(t, objectField(t, objectField(t, importJob, "result"), "report"), "summary")
+			if intField(t, importSummary, "metadataUpdated") != 1 {
+				t.Fatalf("metadataUpdated summary = %#v, want 1", importSummary)
+			}
+			if intField(t, importSummary, "itemImagesPushed") != 1 {
+				t.Fatalf("itemImagesPushed summary = %#v, want 1", importSummary)
+			}
+			if intField(t, importSummary, "peopleImages") != 1 {
+				t.Fatalf("peopleImages summary = %#v, want 1", importSummary)
+			}
+
+			mockState.mu.Lock()
+			defer mockState.mu.Unlock()
+			if len(mockState.updateBodies) != 1 {
+				t.Fatalf("metadata update count = %d, want 1", len(mockState.updateBodies))
+			}
+			accepted := mockState.updateBodies[0]
+			if got := fmt.Sprint(accepted["Overview"]); got != "Source overview" {
+				t.Fatalf("metadata update did not carry source overview: %#v", accepted)
+			}
+			if _, ok := accepted["Studios"]; ok != tt.wantStudios {
+				t.Fatalf("accepted payload Studios presence = %v, want %v: %#v", ok, tt.wantStudios, accepted)
+			}
+			assertPortablePeoplePayload(t, accepted)
+			if got := mockState.strictRejects; got != tt.wantStrictRejects {
+				t.Fatalf("strict metadata rejects = %d, want %d", got, tt.wantStrictRejects)
+			}
+			if got, want := mockState.itemImageUploads, []string{"/Items/new-movie-1/Images/Logo"}; !slices.Equal(got, want) {
+				t.Fatalf("item image uploads = %#v, want %#v", got, want)
+			}
+			if got, want := mockState.personImageUploads, []string{"/Items/6384/Images/Primary"}; !slices.Equal(got, want) {
+				t.Fatalf("person image uploads = %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 
@@ -267,6 +303,7 @@ type mockEmbyState struct {
 	updateBodies       []map[string]any
 	itemImageUploads   []string
 	personImageUploads []string
+	strictRejects      int
 }
 
 func (s *mockEmbyState) writeCounts() string {
@@ -276,6 +313,19 @@ func (s *mockEmbyState) writeCounts() string {
 }
 
 func newMockEmbyServer(state *mockEmbyState) *httptest.Server {
+	return newMockEmbyServerWithOptions(state, mockEmbyOptions{version: "4.8.11"})
+}
+
+type mockEmbyOptions struct {
+	version        string
+	strictMetadata bool
+	personSearch   bool
+}
+
+func newMockEmbyServerWithOptions(state *mockEmbyState, options mockEmbyOptions) *httptest.Server {
+	if strings.TrimSpace(options.version) == "" {
+		options.version = "4.8.11"
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/System/Info" && r.Header.Get("X-Emby-Token") != "test-key" {
 			http.Error(w, "missing token", http.StatusUnauthorized)
@@ -284,9 +334,20 @@ func newMockEmbyServer(state *mockEmbyState) *httptest.Server {
 
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
-			writeSmokeJSON(w, map[string]any{"ServerName": "Mock Emby", "Version": "4.8.11", "Id": "mock"})
+			writeSmokeJSON(w, map[string]any{"ServerName": "Mock Emby", "Version": options.version, "Id": "mock"})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items":
 			handleSmokeItems(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/Persons":
+			if !options.personSearch {
+				http.Error(w, "legacy persons search unavailable", http.StatusNotFound)
+				return
+			}
+			writeSmokeJSON(w, map[string]any{
+				"Items": []map[string]any{
+					targetPerson(),
+				},
+				"TotalRecordCount": 1,
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/old-movie-1/Images":
 			writeSmokeJSON(w, []map[string]any{
 				{"ImageType": "Primary"},
@@ -297,12 +358,7 @@ func newMockEmbyServer(state *mockEmbyState) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/old-movie-1/Images/Logo":
 			writeSmokeImage(w, "logo-image")
 		case r.Method == http.MethodGet && r.URL.Path == "/Persons/Keanu Reeves":
-			writeSmokeJSON(w, map[string]any{
-				"Name":            "Keanu Reeves",
-				"Id":              6384,
-				"ProviderIds":     map[string]string{"Tmdb": "6384"},
-				"PrimaryImageTag": "person-primary",
-			})
+			writeSmokeJSON(w, targetPerson())
 		case r.Method == http.MethodGet && r.URL.Path == "/Persons/Keanu Reeves/Images/Primary":
 			writeSmokeImage(w, "person-image")
 		case r.Method == http.MethodPost && r.URL.Path == "/Items/new-movie-1":
@@ -310,6 +366,15 @@ func newMockEmbyServer(state *mockEmbyState) *httptest.Server {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
+			}
+			if options.strictMetadata {
+				if _, hasStudios := body["Studios"]; hasStudios {
+					state.mu.Lock()
+					state.strictRejects++
+					state.mu.Unlock()
+					http.Error(w, "Value cannot be null. (Parameter 'source')", http.StatusBadRequest)
+					return
+				}
 			}
 			state.mu.Lock()
 			state.updateBodies = append(state.updateBodies, body)
@@ -376,6 +441,7 @@ func sourceMovie() map[string]any {
 		"ProductionYear": 2024,
 		"ProviderIds":    map[string]string{"Tmdb": "12345"},
 		"Genres":         []string{"Action"},
+		"Studios":        []map[string]any{{"Name": "Village Roadshow", "Id": 100}},
 		"ImageTags":      map[string]string{"Primary": "primary-tag", "Logo": "logo-tag"},
 		"People": []map[string]any{
 			{
@@ -390,6 +456,15 @@ func sourceMovie() map[string]any {
 	}
 }
 
+func targetPerson() map[string]any {
+	return map[string]any{
+		"Name":            "Keanu Reeves",
+		"Id":              6384,
+		"ProviderIds":     map[string]string{"Tmdb": "6384"},
+		"PrimaryImageTag": "person-primary",
+	}
+}
+
 func targetMovie() map[string]any {
 	return map[string]any{
 		"Id":             "new-movie-1",
@@ -399,6 +474,32 @@ func targetMovie() map[string]any {
 		"ProductionYear": 2024,
 		"ProviderIds":    map[string]string{"Tmdb": "99999"},
 		"ImageTags":      map[string]string{},
+	}
+}
+
+func assertPortablePeoplePayload(t *testing.T, payload map[string]any) {
+	t.Helper()
+	people, ok := payload["People"].([]any)
+	if !ok || len(people) != 1 {
+		t.Fatalf("payload People = %#v, want one portable person", payload["People"])
+	}
+	person, ok := people[0].(map[string]any)
+	if !ok {
+		t.Fatalf("payload person shape = %#v", people[0])
+	}
+	if _, ok := person["Id"]; ok {
+		t.Fatalf("payload person leaked old internal Id: %#v", person)
+	}
+	if got := fmt.Sprint(person["Name"]); got != "Keanu Reeves" {
+		t.Fatalf("payload person Name = %q", got)
+	}
+	if got := fmt.Sprint(person["Role"]); got != "Neo" {
+		t.Fatalf("payload person Role = %q", got)
+	}
+	if _, ok := person["ProviderIds"].(map[string]any); !ok {
+		if _, ok := person["ProviderIds"].(map[string]string); !ok {
+			t.Fatalf("payload person ProviderIds missing: %#v", person)
+		}
 	}
 }
 

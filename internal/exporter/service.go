@@ -1533,6 +1533,14 @@ func updateItemMetadata(ctx context.Context, client *emby.Client, targetID strin
 	if err == nil || !shouldRetryWithMinimalMetadata(err) {
 		return err
 	}
+	compatibility := item
+	compatibility.Raw = compatibilityMetadataPayload(item.Raw)
+	err = retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
+		return client.UpdateItem(attemptCtx, targetID, compatibility)
+	})
+	if err == nil || !shouldRetryWithMinimalMetadata(err) {
+		return err
+	}
 	fallback := item
 	fallback.Raw = minimalMetadataPayload(item.Raw)
 	return retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
@@ -1548,6 +1556,23 @@ func shouldRetryWithMinimalMetadata(err error) bool {
 	return strings.Contains(text, "http 400") ||
 		strings.Contains(text, "value cannot be null") ||
 		strings.Contains(text, "parameter 'source'")
+}
+
+func compatibilityMetadataPayload(raw map[string]any) map[string]any {
+	out := make(map[string]any, len(raw))
+	for key, value := range raw {
+		if strings.EqualFold(key, "Studios") {
+			continue
+		}
+		out[key] = value
+	}
+	if _, ok := out["Source"]; !ok {
+		out["Source"] = "Unknown"
+	}
+	if _, ok := out["ProviderIds"]; !ok {
+		out["ProviderIds"] = map[string]string{}
+	}
+	return out
 }
 
 func minimalMetadataPayload(raw map[string]any) map[string]any {
