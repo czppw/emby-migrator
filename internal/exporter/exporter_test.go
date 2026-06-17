@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +59,71 @@ func TestExportDirectoryNameIncludesTimeServerAndLibrary(t *testing.T) {
 	)
 	if name != "20260616-123005-影视库-日韩电影" {
 		t.Fatalf("exportDirectoryName returned %q", name)
+	}
+}
+
+func TestResolveExportPathRejectsTraversal(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), storage.Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, name, err := service.ResolveExportPath("pkg")
+	if err != nil {
+		t.Fatalf("ResolveExportPath valid package returned error: %v", err)
+	}
+	if name != "pkg" || resolved != exportDir {
+		t.Fatalf("ResolveExportPath = (%q, %q), want (%q, pkg)", resolved, name, exportDir)
+	}
+	for _, input := range []string{"..", "../pkg", "..\\pkg", filepath.Join(dataDir, "outside")} {
+		if _, _, err := service.ResolveExportPath(input); err == nil || !strings.Contains(err.Error(), "exports directory") {
+			t.Fatalf("ResolveExportPath(%q) error = %v, want exports directory rejection", input, err)
+		}
+	}
+}
+
+func TestListImportReportsReturnsSummaryAndIgnoresOtherFiles(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), storage.Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-100000.json"), ImportReport{
+		StartedAt: startedAt,
+		EndedAt:   startedAt.Add(time.Minute),
+		DryRun:    true,
+		Summary: storage.Summary{
+			Matched:   2,
+			Ambiguous: 1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest-copy.json"), map[string]any{"ignored": true}); err != nil {
+		t.Fatal(err)
+	}
+	reports, err := service.ListImportReports("pkg")
+	if err != nil {
+		t.Fatalf("ListImportReports returned error: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("ListImportReports returned %#v, want one report", reports)
+	}
+	report := reports[0]
+	if report.Name != "import-report-20260617-100000.json" || !report.DryRun || report.Summary.Matched != 2 || report.Summary.Ambiguous != 1 {
+		t.Fatalf("unexpected report info: %#v", report)
+	}
+	if filepath.IsAbs(report.Path) {
+		t.Fatalf("report list should not expose absolute path: %q", report.Path)
 	}
 }
 

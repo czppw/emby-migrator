@@ -741,6 +741,37 @@ h2 {
   margin-top: 16px;
 }
 
+.report-history {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.report-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.report-history-heading strong {
+  font-size: 15px;
+}
+
+.report-history select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--field-bg);
+  color: var(--ink);
+}
+
 .job-status {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

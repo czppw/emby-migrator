@@ -59,6 +59,18 @@ type ImportResult struct {
 	Manifest storage.Manifest `json:"manifest"`
 }
 
+type ImportReportInfo struct {
+	ExportName string          `json:"exportName"`
+	Name       string          `json:"name"`
+	Path       string          `json:"path"`
+	Size       int64           `json:"size"`
+	ModifiedAt time.Time       `json:"modifiedAt"`
+	DryRun     bool            `json:"dryRun"`
+	StartedAt  time.Time       `json:"startedAt,omitempty"`
+	EndedAt    time.Time       `json:"endedAt,omitempty"`
+	Summary    storage.Summary `json:"summary"`
+}
+
 type ImportReport struct {
 	StartedAt     time.Time       `json:"startedAt"`
 	EndedAt       time.Time       `json:"endedAt"`
@@ -301,6 +313,130 @@ func (s *Service) ListExports() ([]string, error) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(out)))
 	return out, nil
+}
+
+func (s *Service) ResolveExportPath(exportPath string) (string, string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(exportPath))
+	if cleaned == "." || cleaned == "" {
+		return "", "", fmt.Errorf("exportPath is required")
+	}
+	exportsDir, err := filepath.Abs(s.ExportsDir())
+	if err != nil {
+		return "", "", err
+	}
+	var resolved string
+	if filepath.IsAbs(cleaned) {
+		resolved, err = filepath.Abs(cleaned)
+	} else {
+		resolved, err = filepath.Abs(filepath.Join(exportsDir, cleaned))
+	}
+	if err != nil {
+		return "", "", err
+	}
+	rel, err := filepath.Rel(exportsDir, resolved)
+	if err != nil {
+		return "", "", err
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("exportPath must stay under exports directory")
+	}
+	if _, err := os.Stat(filepath.Join(resolved, "manifest.json")); err != nil {
+		if os.IsNotExist(err) {
+			return "", "", fmt.Errorf("export package not found: %s", exportPath)
+		}
+		return "", "", err
+	}
+	return resolved, filepath.Base(resolved), nil
+}
+
+func (s *Service) ListImportReports(exportPath string) ([]ImportReportInfo, error) {
+	resolved, exportName, err := s.ResolveExportPath(exportPath)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(resolved)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ImportReportInfo, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !isImportReportFile(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		reportPath := filepath.Join(resolved, entry.Name())
+		var report ImportReport
+		if err := storage.ReadJSON(reportPath, &report); err != nil {
+			return nil, fmt.Errorf("read import report %s: %w", entry.Name(), err)
+		}
+		out = append(out, ImportReportInfo{
+			ExportName: exportName,
+			Name:       entry.Name(),
+			Path:       filepath.ToSlash(filepath.Join(exportName, entry.Name())),
+			Size:       info.Size(),
+			ModifiedAt: info.ModTime(),
+			DryRun:     report.DryRun,
+			StartedAt:  report.StartedAt,
+			EndedAt:    report.EndedAt,
+			Summary:    report.Summary,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name > out[j].Name
+	})
+	return out, nil
+}
+
+func (s *Service) ImportReportPath(exportPath, reportName string) (string, error) {
+	resolved, _, err := s.ResolveExportPath(exportPath)
+	if err != nil {
+		return "", err
+	}
+	name := filepath.Base(strings.TrimSpace(reportName))
+	if name != strings.TrimSpace(reportName) || !isImportReportFile(name) {
+		return "", fmt.Errorf("invalid import report name")
+	}
+	path := filepath.Join(resolved, name)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("import report not found: %s", name)
+		}
+		return "", err
+	}
+	return path, nil
+}
+
+func isImportReportFile(name string) bool {
+	return strings.HasPrefix(name, "import-report-") && strings.HasSuffix(name, ".json")
+}
+
+func safePackagePath(root, relPath string) (string, error) {
+	if strings.TrimSpace(relPath) == "" {
+		return "", fmt.Errorf("package path is required")
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(relPath))
+	if filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("package path must be relative: %s", relPath)
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.Abs(filepath.Join(rootAbs, cleaned))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(rootAbs, resolved)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("package path escapes export package: %s", relPath)
+	}
+	return resolved, nil
 }
 
 func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (ExportResult, error) {
@@ -881,9 +1017,9 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	if info, err := client.SystemInfo(ctx); err == nil {
 		j.Log("info", "连接到目标 Emby %s (%s)", info.ServerName, info.Version)
 	}
-	exportPath := req.ExportPath
-	if !filepath.IsAbs(exportPath) {
-		exportPath = filepath.Join(s.ExportsDir(), exportPath)
+	exportPath, _, err := s.ResolveExportPath(req.ExportPath)
+	if err != nil {
+		return ImportResult{}, err
 	}
 	var manifest storage.Manifest
 	if err := storage.ReadJSON(filepath.Join(exportPath, "manifest.json"), &manifest); err != nil {
@@ -1098,21 +1234,21 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, exportPat
 			if len(imageTypeSet) > 0 && !imageTypeSet[strings.ToLower(img.Type)] {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(exportPath, filepath.FromSlash(img.Path)))
+			imagePath, err := safePackagePath(exportPath, img.Path)
+			if err == nil {
+				data, err := os.ReadFile(imagePath)
+				if err == nil {
+					err = retryWithTimeout(ctx, importRetryAttempts, itemImageUploadTimeout, func(attemptCtx context.Context) error {
+						return client.UploadImage(attemptCtx, target.ID, img.Type, data)
+					})
+				}
+			}
 			if err != nil {
 				match.ImageFailures++
-				match.ImageErrors = append(match.ImageErrors, fmt.Sprintf("%s 读取失败: %v", img.Type, err))
+				match.ImageErrors = append(match.ImageErrors, fmt.Sprintf("%s 处理失败: %v", img.Type, err))
 				continue
 			}
-			err = retryWithTimeout(ctx, importRetryAttempts, itemImageUploadTimeout, func(attemptCtx context.Context) error {
-				return client.UploadImage(attemptCtx, target.ID, img.Type, data)
-			})
-			if err == nil {
-				match.ImagesPushed++
-			} else {
-				match.ImageFailures++
-				match.ImageErrors = append(match.ImageErrors, fmt.Sprintf("%s 上传失败: %v", img.Type, err))
-			}
+			match.ImagesPushed++
 		}
 	}
 	if metadataErr != nil {
@@ -1253,7 +1389,11 @@ func allowedImageTypes(imageTypes []string) map[string]bool {
 
 func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath string) {
 	var info storage.ItemInfo
-	if err := storage.ReadJSON(filepath.Join(exportPath, filepath.FromSlash(entry.InfoPath)), &info); err != nil {
+	infoPath, err := safePackagePath(exportPath, entry.InfoPath)
+	if err != nil {
+		return
+	}
+	if err := storage.ReadJSON(infoPath, &info); err != nil {
 		return
 	}
 	source := info.Item
@@ -1437,7 +1577,11 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, e
 }
 
 func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, exportPath string, task personImageTask) personImageResult {
-	data, err := os.ReadFile(filepath.Join(exportPath, filepath.FromSlash(task.Path)))
+	imagePath, err := safePackagePath(exportPath, task.Path)
+	if err != nil {
+		return personImageResult{Name: task.Name, Err: fmt.Errorf("头像路径无效: %w", err)}
+	}
+	data, err := os.ReadFile(imagePath)
 	if err != nil {
 		return personImageResult{Name: task.Name, Err: fmt.Errorf("读取头像失败: %w", err)}
 	}

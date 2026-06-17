@@ -101,6 +101,41 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 		t.Fatalf("precheck wrote to mock Emby: %s", got)
 	}
 
+	var reportsResponse map[string][]map[string]any
+	getJSON(t, client, app.URL+"/api/import-reports?exportPath="+filepath.Base(exportPath), &reportsResponse, http.StatusOK)
+	if len(reportsResponse["reports"]) != 1 {
+		t.Fatalf("reports response = %#v, want one report", reportsResponse)
+	}
+	reportName := stringField(t, reportsResponse["reports"][0], "name")
+	if !strings.HasPrefix(reportName, "import-report-") || !strings.HasSuffix(reportName, ".json") {
+		t.Fatalf("unexpected report name %q", reportName)
+	}
+	if got := boolField(t, reportsResponse["reports"][0], "dryRun"); !got {
+		t.Fatalf("precheck report listing dryRun = false, want true")
+	}
+	downloadURL := app.URL + "/api/import-reports/download?exportPath=" + filepath.Base(exportPath) + "&name=" + reportName
+	resp, err := client.Get(downloadURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download report status = %d, body=%s", resp.StatusCode, downloaded)
+	}
+	if got := resp.Header.Get("Content-Disposition"); !strings.Contains(got, reportName) {
+		t.Fatalf("download disposition = %q, want report filename", got)
+	}
+	var downloadedReport map[string]any
+	if err := json.Unmarshal(downloaded, &downloadedReport); err != nil {
+		t.Fatalf("downloaded report is not JSON: %v\n%s", err, downloaded)
+	}
+	if got := boolField(t, downloadedReport, "dryRun"); !got {
+		t.Fatalf("downloaded report dryRun = false, want true")
+	}
+	getJSON(t, client, app.URL+"/api/import-reports?exportPath=..%2f..", nil, http.StatusBadRequest)
+	getJSON(t, client, app.URL+"/api/import-reports/download?exportPath="+filepath.Base(exportPath)+"&name=manifest.json", nil, http.StatusBadRequest)
+
 	var importCreate map[string]any
 	postJSON(t, client, app.URL+"/api/jobs/import", map[string]any{
 		"baseUrl":             mockEmby.URL,
@@ -292,6 +327,24 @@ func postJSON(t *testing.T, client *http.Client, url string, payload any, out an
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("POST %s status = %d, want %d, body=%s", url, resp.StatusCode, wantStatus, strings.TrimSpace(string(data)))
+	}
+	if out != nil && len(data) > 0 {
+		if err := json.Unmarshal(data, out); err != nil {
+			t.Fatalf("decode response from %s: %v\n%s", url, err, data)
+		}
+	}
+}
+
+func getJSON(t *testing.T, client *http.Client, url string, out any, wantStatus int) {
+	t.Helper()
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("GET %s status = %d, want %d, body=%s", url, resp.StatusCode, wantStatus, strings.TrimSpace(string(data)))
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {

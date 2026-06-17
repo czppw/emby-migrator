@@ -75,6 +75,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /api/connection/test", s.requireAuth(http.HandlerFunc(s.handleConnectionTest)))
 	mux.Handle("POST /api/libraries", s.requireAuth(http.HandlerFunc(s.handleLibraries)))
 	mux.Handle("GET /api/exports", s.requireAuth(http.HandlerFunc(s.handleExports)))
+	mux.Handle("GET /api/import-reports", s.requireAuth(http.HandlerFunc(s.handleImportReports)))
+	mux.Handle("GET /api/import-reports/download", s.requireAuth(http.HandlerFunc(s.handleImportReportDownload)))
 	mux.Handle("POST /api/jobs/export", s.requireAuth(http.HandlerFunc(s.handleExportJob)))
 	mux.Handle("POST /api/jobs/import", s.requireAuth(http.HandlerFunc(s.handleImportJob)))
 	mux.Handle("POST /api/jobs/import/precheck", s.requireAuth(http.HandlerFunc(s.handleImportPrecheckJob)))
@@ -129,6 +131,37 @@ func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"exports": exports})
+}
+
+func (s *Server) handleImportReports(w http.ResponseWriter, r *http.Request) {
+	exportPath := strings.TrimSpace(r.URL.Query().Get("exportPath"))
+	if exportPath == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath is required"))
+		return
+	}
+	reports, err := s.exporter.ListImportReports(exportPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reports": reports})
+}
+
+func (s *Server) handleImportReportDownload(w http.ResponseWriter, r *http.Request) {
+	exportPath := strings.TrimSpace(r.URL.Query().Get("exportPath"))
+	reportName := strings.TrimSpace(r.URL.Query().Get("name"))
+	if exportPath == "" || reportName == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath and name are required"))
+		return
+	}
+	reportPath, err := s.exporter.ImportReportPath(exportPath, reportName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(reportPath)))
+	http.ServeFile(w, r, reportPath)
 }
 
 func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {

@@ -51,6 +51,7 @@
     libraries: [],
     selectedLibraryIds: new Set(),
     exports: [],
+    reports: [],
     currentJobId: "",
     currentJobKind: "",
     currentJobStatus: "",
@@ -116,6 +117,9 @@
       "refreshExportsBtn",
       "exportsSelect",
       "importPath",
+      "refreshReportsBtn",
+      "downloadReportBtn",
+      "reportsSelect",
       "importSkipImages",
       "importOverwrite",
       "importIncludePeopleImages",
@@ -148,6 +152,9 @@
     els.refreshExportsBtn.addEventListener("click", handleRefreshExports);
     els.exportsSelect.addEventListener("change", handleExportSelection);
     els.importPath.addEventListener("input", updateControls);
+    els.refreshReportsBtn.addEventListener("click", handleRefreshReports);
+    els.reportsSelect.addEventListener("change", updateControls);
+    els.downloadReportBtn.addEventListener("click", handleDownloadReport);
     els.startPrecheckBtn.addEventListener("click", handleStartPrecheck);
     els.startImportBtn.addEventListener("click", handleStartImport);
     els.downloadLogsBtn.addEventListener("click", handleDownloadLogs);
@@ -408,7 +415,9 @@
     try {
       const data = await fetchJson("/api/exports");
       state.exports = normalizeExports(data);
+      state.reports = [];
       renderExports();
+      renderReports();
       const count = state.exports.length;
       setNotice(
         els.importNotice,
@@ -427,7 +436,51 @@
   function handleExportSelection() {
     const selected = state.exports.find((item) => item.value === els.exportsSelect.value);
     els.importPath.value = selected ? selected.value : "";
+    state.reports = [];
+    renderReports();
     updateControls();
+  }
+
+  async function handleRefreshReports() {
+    const exportPath = els.importPath.value.trim();
+    if (!exportPath) {
+      setNotice(els.importNotice, "请先选择或输入导出包。", "error");
+      return;
+    }
+
+    setButtonBusy("refreshReports", els.refreshReportsBtn, true, "刷新中");
+    try {
+      const data = await fetchJson(`/api/import-reports?exportPath=${encodeURIComponent(exportPath)}`);
+      state.reports = normalizeReports(data);
+      renderReports();
+      setNotice(
+        els.importNotice,
+        state.reports.length ? `已发现 ${state.reports.length} 个历史报告。` : "该导出包还没有历史报告。",
+        state.reports.length ? "ok" : "",
+      );
+    } catch (error) {
+      state.reports = [];
+      renderReports();
+      setNotice(els.importNotice, `读取历史报告失败：${error.message}`, "error");
+      appendSystemLog(`读取历史报告失败：${error.message}`);
+    } finally {
+      setButtonBusy("refreshReports", els.refreshReportsBtn, false);
+      updateControls();
+    }
+  }
+
+  function handleDownloadReport() {
+    const exportPath = els.importPath.value.trim();
+    const reportName = els.reportsSelect.value;
+    if (!exportPath || !reportName) {
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = `/api/import-reports/download?exportPath=${encodeURIComponent(exportPath)}&name=${encodeURIComponent(reportName)}`;
+    link.download = reportName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   }
 
   async function handleStartExport() {
@@ -758,6 +811,22 @@
     });
   }
 
+  function normalizeReports(data) {
+    const list = (Array.isArray(data) && data) || data.reports || data.Reports || [];
+    return list.map((raw, index) => {
+      const name = String(readFirst(raw, ["name", "Name", "id", "Id"]) || `report-${index + 1}.json`);
+      const summary = safeObject(readFirst(raw, ["summary", "Summary"]));
+      return {
+        name,
+        label: name,
+        dryRun: Boolean(readFirst(raw, ["dryRun", "DryRun"])),
+        startedAt: readFirst(raw, ["startedAt", "StartedAt", "modifiedAt", "ModifiedAt"]),
+        endedAt: readFirst(raw, ["endedAt", "EndedAt"]),
+        summary,
+      };
+    });
+  }
+
   function renderLibraries() {
     els.libraryList.textContent = "";
 
@@ -827,6 +896,43 @@
     });
   }
 
+  function renderReports() {
+    if (!els.reportsSelect) {
+      return;
+    }
+    els.reportsSelect.textContent = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = state.reports.length
+      ? "选择一个历史报告"
+      : els.importPath.value.trim()
+        ? "该导出包暂无历史报告"
+        : "选择导出包后可查看历史报告";
+    els.reportsSelect.appendChild(placeholder);
+
+    state.reports.forEach((report) => {
+      const option = document.createElement("option");
+      option.value = report.name;
+      option.textContent = formatReportOption(report);
+      els.reportsSelect.appendChild(option);
+    });
+  }
+
+  function formatReportOption(report) {
+    const summary = safeObject(report.summary);
+    const mode = report.dryRun ? "预检" : "导入";
+    const time = formatShortTime(report.endedAt || report.startedAt);
+    const total = numberValue(summary.items) || numberValue(summary.matched) + numberValue(summary.unmatched) + numberValue(summary.ambiguous) + numberValue(summary.errors);
+    const risks = [
+      numberValue(summary.unmatched) ? `未匹配 ${numberValue(summary.unmatched)}` : "",
+      numberValue(summary.ambiguous) ? `歧义 ${numberValue(summary.ambiguous)}` : "",
+      numberValue(summary.errors) ? `错误 ${numberValue(summary.errors)}` : "",
+    ].filter(Boolean);
+    return [mode, time, total ? `${total} 项` : "", risks.join(" / ") || "无异常", report.name]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
   function addPill(parent, text) {
     const pill = document.createElement("span");
     pill.className = "pill";
@@ -876,6 +982,7 @@
     const hasLibraries = state.libraries.length > 0;
     const hasSelectedLibraries = state.selectedLibraryIds.size > 0;
     const hasImportPath = Boolean(els.importPath.value.trim());
+    const hasSelectedReport = Boolean(els.reportsSelect && els.reportsSelect.value);
     const hasActiveJob = Boolean(state.currentJobId) && !TERMINAL_STATES.has(state.currentJobStatus);
 
     els.testConnectionBtn.disabled = locked || state.busy.has("testConnection");
@@ -883,6 +990,10 @@
     els.refreshLibrariesBtn.disabled =
       locked || !state.connected || state.busy.has("refreshLibraries");
     els.refreshExportsBtn.disabled = locked || state.busy.has("refreshExports");
+    els.refreshReportsBtn.disabled =
+      locked || !hasImportPath || state.busy.has("refreshReports");
+    els.reportsSelect.disabled = locked || state.reports.length === 0;
+    els.downloadReportBtn.disabled = locked || !hasSelectedReport;
     els.selectAllLibraries.disabled = locked || !hasLibraries;
     els.startExportBtn.disabled =
       locked || !state.connected || !hasSelectedLibraries || state.busy.has("startExport");
@@ -1305,6 +1416,14 @@
         return acc;
       }, {});
     return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} 北京时间`;
+  }
+
+  function formatShortTime(value) {
+    if (!value) {
+      return "";
+    }
+    const full = formatBeijingTime(value);
+    return full.replace(" 北京时间", "");
   }
 
   function formatStatusLine(data) {
