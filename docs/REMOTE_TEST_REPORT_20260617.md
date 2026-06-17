@@ -6,11 +6,12 @@ This report intentionally omits server addresses, SSH details, private key paths
 
 - Date: 2026-06-17 Asia/Shanghai
 - Operator: Codex
-- Candidate git commit: `921820c`
-- Functional compatibility commit: `c00c90d`
-- Published Docker image tested: not yet published for this candidate
+- Candidate git commit: `7dcc0e10a63ad0dcbe84281405024849cd158c8a`
+- Functional compatibility commits: `515a32f`, `c00c90d`
+- Published Docker image confirmed: `czppwa/emby-migrator:sha-7dcc0e1` (`latest` observed at 2026-06-17 15:26 Asia/Shanghai)
 - Runtime used for remote test: current Linux amd64 binary mounted into an isolated test container
-- Existing rollback baseline: `czppwa/emby-migrator:sha-8c42aed`
+- Previous rollback baseline: `czppwa/emby-migrator:sha-8c42aed`
+- Current accepted rollback baseline after publication: `czppwa/emby-migrator:sha-7dcc0e1`
 
 ## Local Verification
 
@@ -70,9 +71,9 @@ Note: the remote Docker daemon could not build the image directly because the co
 - An initial 4.9-export-to-4.8 import exposed two same-title episode ambiguities. The matcher was fixed to use episode path-series candidates during episode matching and name-search fallback. The retest completed with zero ambiguous items.
 - No unmatched or errored media items were observed in the final verified run.
 
-## Remaining Release Gate
+## Release Confirmation
 
-- Push the candidate commits only when ready to publish.
-- Confirm GitHub Actions builds and pushes the Docker image.
-- Confirm Docker Hub has the new `latest` and `sha-*` tags.
-- Update the accepted rollback baseline only after the published image is verified.
+- Candidate commits were pushed to `main`.
+- Docker Hub contains `czppwa/emby-migrator:sha-7dcc0e1`.
+- Docker Hub `latest` was observed updated at 2026-06-17 15:26 Asia/Shanghai and corresponds to the beta.2 code release commit.
+- Accepted rollback baseline was updated to `czppwa/emby-migrator:sha-7dcc0e1`; previous baseline `sha-8c42aed` remains recorded as an older fallback point.

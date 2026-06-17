@@ -252,13 +252,14 @@ docker run -d \
 
 ### 已知回滚点
 
-- 当前验收基线：`sha-8c42aed` / Git commit `8c42aed2ee34524165c9c69f2cbee5832de38c96`。该版本已推送到 Docker Hub `czppwa/emby-migrator:latest` 和 `czppwa/emby-migrator:sha-8c42aed`，作为后续开发出问题时的首选回滚版本。
+- 当前验收基线：`0.1.0-beta.2` / `sha-7dcc0e1` / Git commit `7dcc0e10a63ad0dcbe84281405024849cd158c8a`。该版本已推送到 Docker Hub `czppwa/emby-migrator:latest` 和 `czppwa/emby-migrator:sha-7dcc0e1`，作为后续开发出问题时的首选回滚版本。
 - `sha-f0a58c2`：早期 4.8.11 相对稳定回滚点。
-- `sha-8c42aed`：修复 4.9.5 人物头像查找后的版本。
+- `sha-8c42aed`：修复 4.9.5 人物头像查找后的上一验收基线。
+- `sha-7dcc0e1`：`0.1.0-beta.2`，完成 Emby 4.8.11/4.9.5 双版本导出导入、跨版本导入、同名剧集匹配修复和版本显示更新后的当前验收基线。
 
 回滚标签会随开发继续增加。每次发布重大修复后，应把对应标签和修复范围补到本节。
 用户采用目标模式后，每次用户验收通过的最终版本都必须在本节新增“当前验收基线”或“已验证回滚点”，记录 Git commit、Docker Hub 标签、验证范围和发布日期。
-未经过用户验收的开发版本可以推送 `sha-xxxxxxx` 测试标签，但不应覆盖“当前验收基线”的描述；如果 `latest` 被更新而新版本出问题，优先使用本节记录的 `sha-8c42aed` 回滚。
+未经过用户验收的开发版本可以推送 `sha-xxxxxxx` 测试标签，但不应覆盖“当前验收基线”的描述；如果 `latest` 被更新而新版本出问题，优先使用本节记录的 `sha-7dcc0e1` 回滚；必要时可继续回退到上一稳定点 `sha-8c42aed`。
 具体回滚步骤见 `docs/ROLLBACK.md`。
 
 ## 7. 关键上下文快照
@@ -275,7 +276,7 @@ docker run -d \
 - 用户希望 Docker 使用 host 网络，默认 `/opt/emby-migrator/data` 和 `/opt/emby-migrator/config` 映射到容器 `/data`、`/config`。
 - 用户希望页面显示版本信息。
 - 用户采用目标模式：后续整体开发、测试、双版本验证由 Codex 主动执行，用户主要审核最终版本。
-- 当前已记录的可回滚验收基线为 Docker Hub `czppwa/emby-migrator:sha-8c42aed`，对应 Git commit `8c42aed2ee34524165c9c69f2cbee5832de38c96`；后续开发若出问题，优先回滚到该标签。
+- 当前已记录的可回滚验收基线为 `0.1.0-beta.2` / Docker Hub `czppwa/emby-migrator:sha-7dcc0e1`，对应 Git commit `7dcc0e10a63ad0dcbe84281405024849cd158c8a`；后续开发若出问题，优先回滚到该标签，必要时再退到上一稳定点 `sha-8c42aed`。
 - 测试大版本兼容时必须使用远端测试环境按不同 Emby 版本做实际导出/导入验证；本地 mock 只能作为提前防线，不能替代最终大版本实测。
 - 用户提供过临时远端服务器和 SSH 私钥用于双版本开发测试；该类连接信息只能作为本地/会话敏感信息使用，不得写进仓库或公开文档。
 - 远端双版本测试环境当前重点媒体库为 `日韩剧集` 和 `日韩电影`；后续新增测试媒体库沿用同一媒体地址/路径约定，测试匹配逻辑时不能依赖媒体库内部 ID 或媒体库名称强绑定。

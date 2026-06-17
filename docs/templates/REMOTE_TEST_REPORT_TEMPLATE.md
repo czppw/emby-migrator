@@ -90,7 +90,7 @@
 - 回滚命令：
 
 ```bash
-docker pull czppwa/emby-migrator:sha-8c42aed
+docker pull czppwa/emby-migrator:sha-xxxxxxx
 ```
 
 ## 10. 最终结论
@@ -99,4 +99,3 @@ docker pull czppwa/emby-migrator:sha-8c42aed
 - 是否允许交付用户验收：是 / 否
 - 是否需要更新 `docs/PROJECT_BLUEPRINT.md` 回滚基线：是 / 否
 - 结论摘要：
-
