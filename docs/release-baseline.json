@@ -7,6 +7,16 @@
     "dockerLatestObservedAt": "2026-06-16T13:05:08Z",
     "dockerShaTagObservedAt": "2026-06-16T13:05:10Z",
     "status": "accepted-rollback-baseline",
+    "acceptedAt": "2026-06-16T13:05:10Z",
+    "remoteTestReport": "docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md",
+    "verifiedEmbyVersions": [
+      "4.8.11",
+      "4.9.5"
+    ],
+    "remoteTestLibraries": [
+      "日韩剧集",
+      "日韩电影"
+    ],
     "scope": [
       "Emby 4.9.5 person avatar lookup fallback",
       "portable metadata payload cleanup",
