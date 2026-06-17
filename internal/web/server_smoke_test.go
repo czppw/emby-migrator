@@ -173,6 +173,85 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 	}
 }
 
+func TestImportPrecheckFailsWhenExportPackageIsIncomplete(t *testing.T) {
+	mockState := &mockEmbyState{}
+	mockEmby := newMockEmbyServer(mockState)
+	defer mockEmby.Close()
+
+	dataDir := t.TempDir()
+	app := httptest.NewServer(NewServer(
+		config.Config{
+			DataDir:       dataDir,
+			Version:       "smoke-test",
+			AdminPassword: "pw",
+			SessionSecret: "test-session-secret",
+		},
+		job.NewManager(),
+		exporter.NewService(dataDir),
+	).Routes())
+	defer app.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := app.Client()
+	client.Jar = jar
+	postJSON(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, nil, http.StatusOK)
+
+	var exportCreate map[string]any
+	postJSON(t, client, app.URL+"/api/jobs/export", map[string]any{
+		"baseUrl":             mockEmby.URL,
+		"apiKey":              "test-key",
+		"libraryIds":          []string{"lib-movies"},
+		"includePeopleImages": true,
+		"imageTypes":          []string{"Primary", "Logo"},
+	}, &exportCreate, http.StatusAccepted)
+	exportJob := waitForJob(t, client, app.URL, stringField(t, exportCreate, "id"))
+	exportPath := stringField(t, objectField(t, exportJob, "result"), "path")
+	var manifest map[string]any
+	if err := readJSONFile(filepath.Join(exportPath, "manifest.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	items, ok := manifest["items"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("manifest items missing: %#v", manifest["items"])
+	}
+	firstItem, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest item shape = %#v", items[0])
+	}
+	images, ok := firstItem["images"].([]any)
+	if !ok || len(images) == 0 {
+		t.Fatalf("manifest item images missing: %#v", firstItem["images"])
+	}
+	firstImage, ok := images[0].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest image shape = %#v", images[0])
+	}
+	imagePath, ok := firstImage["path"].(string)
+	if !ok || imagePath == "" {
+		t.Fatalf("manifest image path missing: %#v", firstImage)
+	}
+	if err := os.Remove(filepath.Join(exportPath, filepath.FromSlash(imagePath))); err != nil {
+		t.Fatalf("remove exported image: %v", err)
+	}
+
+	var precheckCreate map[string]any
+	postJSON(t, client, app.URL+"/api/jobs/import/precheck", map[string]any{
+		"baseUrl":    mockEmby.URL,
+		"apiKey":     "test-key",
+		"exportPath": filepath.Base(exportPath),
+	}, &precheckCreate, http.StatusAccepted)
+	failed := waitForJobStatus(t, client, app.URL, stringField(t, precheckCreate, "id"), "failed")
+	if !strings.Contains(fmt.Sprint(failed["error"]), "导出包校验失败") {
+		t.Fatalf("failed job error = %#v, want validation failure", failed["error"])
+	}
+	if got := mockState.writeCounts(); got != "updates=0 itemImages=0 peopleImages=0" {
+		t.Fatalf("failed precheck should not write to mock Emby: %s", got)
+	}
+}
+
 type mockEmbyState struct {
 	mu                 sync.Mutex
 	updateBodies       []map[string]any
@@ -353,7 +432,20 @@ func getJSON(t *testing.T, client *http.Client, url string, out any, wantStatus 
 	}
 }
 
+func readJSONFile(path string, out any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
 func waitForJob(t *testing.T, client *http.Client, appURL, id string) map[string]any {
+	t.Helper()
+	return waitForJobStatus(t, client, appURL, id, "done")
+}
+
+func waitForJobStatus(t *testing.T, client *http.Client, appURL, id, wantStatus string) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -368,15 +460,18 @@ func waitForJob(t *testing.T, client *http.Client, appURL, id string) map[string
 		}
 		resp.Body.Close()
 		status := stringField(t, snapshot, "status")
-		switch status {
-		case "done":
+		if status == wantStatus {
 			return snapshot
-		case "failed", "stopped":
+		}
+		if status == "failed" || status == "stopped" {
+			if status == wantStatus {
+				return snapshot
+			}
 			t.Fatalf("job %s ended with %s: %#v", id, status, snapshot)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("job %s did not finish", id)
+	t.Fatalf("job %s did not reach %s", id, wantStatus)
 	return nil
 }
 

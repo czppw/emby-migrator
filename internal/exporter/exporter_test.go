@@ -127,6 +127,87 @@ func TestListImportReportsReturnsSummaryAndIgnoresOtherFiles(t *testing.T) {
 	}
 }
 
+func TestValidateExportPackageDetectsMissingAndEscapingFiles(t *testing.T) {
+	exportPath := t.TempDir()
+	manifest := storage.Manifest{
+		Items: []storage.ItemEntry{
+			{
+				Name:     "Movie",
+				InfoPath: "libraries/movies/items/movie/info.json",
+				Images: []storage.FileEntry{
+					{Type: "Primary", Path: "libraries/movies/items/movie/poster.jpg"},
+					{Type: "Logo", Path: "libraries/movies/items/movie/missing-logo.png"},
+				},
+			},
+			{
+				Name:     "Escaping",
+				InfoPath: "../outside.json",
+			},
+		},
+		People: []storage.PersonEntry{
+			{
+				Name:  "Actor",
+				Image: &storage.FileEntry{Type: "Primary", Path: "people/actor/primary.jpg"},
+			},
+		},
+	}
+	for _, rel := range []string{
+		"manifest.json",
+		"libraries/movies/items/movie/info.json",
+		"libraries/movies/items/movie/poster.jpg",
+		"people/actor/primary.jpg",
+	} {
+		if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rel)), map[string]any{"ok": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	validation := ValidateExportPackage(exportPath, manifest)
+	if validation.OK() {
+		t.Fatalf("validation should fail for missing and escaping paths: %#v", validation)
+	}
+	if validation.MissingFiles != 1 || validation.InvalidPaths != 1 {
+		t.Fatalf("validation counts = %#v, want one missing and one invalid", validation)
+	}
+	if !strings.Contains(validation.Error(), "导出包校验失败") {
+		t.Fatalf("validation error message = %q", validation.Error())
+	}
+}
+
+func TestValidateExportPackagePassesCompletePackage(t *testing.T) {
+	exportPath := t.TempDir()
+	manifest := storage.Manifest{
+		Items: []storage.ItemEntry{
+			{
+				Name:     "Movie",
+				InfoPath: "libraries/movies/items/movie/info.json",
+				RawPath:  "libraries/movies/items/movie/raw.json",
+				Images:   []storage.FileEntry{{Type: "Primary", Path: "libraries/movies/items/movie/poster.jpg"}},
+			},
+		},
+		People: []storage.PersonEntry{
+			{Name: "Actor", Image: &storage.FileEntry{Type: "Primary", Path: "people/actor/primary.jpg"}},
+		},
+	}
+	for _, rel := range []string{
+		"manifest.json",
+		"libraries/movies/items/movie/info.json",
+		"libraries/movies/items/movie/raw.json",
+		"libraries/movies/items/movie/poster.jpg",
+		"people/actor/primary.jpg",
+	} {
+		if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rel)), map[string]any{"ok": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	validation := ValidateExportPackage(exportPath, manifest)
+	if !validation.OK() {
+		t.Fatalf("validation should pass complete package: %#v", validation)
+	}
+	if validation.CheckedFiles != 5 {
+		t.Fatalf("checked files = %d, want 5", validation.CheckedFiles)
+	}
+}
+
 func TestSummaryLines(t *testing.T) {
 	exportLine := exportSummaryLine(storage.Summary{
 		Libraries:    2,

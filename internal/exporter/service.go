@@ -71,6 +71,13 @@ type ImportReportInfo struct {
 	Summary    storage.Summary `json:"summary"`
 }
 
+type PackageValidation struct {
+	CheckedFiles int      `json:"checkedFiles"`
+	MissingFiles int      `json:"missingFiles"`
+	InvalidPaths int      `json:"invalidPaths"`
+	Errors       []string `json:"errors,omitempty"`
+}
+
 type ImportReport struct {
 	StartedAt     time.Time       `json:"startedAt"`
 	EndedAt       time.Time       `json:"endedAt"`
@@ -411,6 +418,82 @@ func (s *Service) ImportReportPath(exportPath, reportName string) (string, error
 
 func isImportReportFile(name string) bool {
 	return strings.HasPrefix(name, "import-report-") && strings.HasSuffix(name, ".json")
+}
+
+func ValidateExportPackage(exportPath string, manifest storage.Manifest) PackageValidation {
+	validation := PackageValidation{}
+	check := func(scope, relPath string) {
+		if strings.TrimSpace(relPath) == "" {
+			validation.InvalidPaths++
+			validation.addError("%s 路径为空", scope)
+			return
+		}
+		validation.CheckedFiles++
+		path, err := safePackagePath(exportPath, relPath)
+		if err != nil {
+			validation.InvalidPaths++
+			validation.addError("%s 路径无效：%s", scope, relPath)
+			return
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				validation.MissingFiles++
+				validation.addError("%s 文件缺失：%s", scope, relPath)
+				return
+			}
+			validation.InvalidPaths++
+			validation.addError("%s 无法读取：%s", scope, err)
+			return
+		}
+		if info.IsDir() {
+			validation.InvalidPaths++
+			validation.addError("%s 指向目录：%s", scope, relPath)
+		}
+	}
+	check("manifest", "manifest.json")
+	for _, item := range manifest.Items {
+		label := item.Name
+		if strings.TrimSpace(label) == "" {
+			label = item.StableKey
+		}
+		check("项目元数据 "+label, item.InfoPath)
+		if strings.TrimSpace(item.RawPath) != "" {
+			check("项目原始数据 "+label, item.RawPath)
+		}
+		for _, image := range item.Images {
+			check(fmt.Sprintf("媒体图片 %s/%s", label, image.Type), image.Path)
+		}
+	}
+	for _, person := range manifest.People {
+		if person.Image != nil {
+			check("人物头像 "+person.Name, person.Image.Path)
+		}
+	}
+	return validation
+}
+
+func (v PackageValidation) OK() bool {
+	return v.MissingFiles == 0 && v.InvalidPaths == 0
+}
+
+func (v PackageValidation) Error() string {
+	if v.OK() {
+		return ""
+	}
+	return fmt.Sprintf("导出包校验失败：检查 %d 个文件，缺失 %d 个，路径无效 %d 个。%s",
+		v.CheckedFiles,
+		v.MissingFiles,
+		v.InvalidPaths,
+		strings.Join(v.Errors, "；"),
+	)
+}
+
+func (v *PackageValidation) addError(format string, args ...any) {
+	if len(v.Errors) >= 8 {
+		return
+	}
+	v.Errors = append(v.Errors, fmt.Sprintf(format, args...))
 }
 
 func safePackagePath(root, relPath string) (string, error) {
@@ -1025,9 +1108,14 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	if err := storage.ReadJSON(filepath.Join(exportPath, "manifest.json"), &manifest); err != nil {
 		return ImportResult{}, err
 	}
+	validation := ValidateExportPackage(exportPath, manifest)
+	if !validation.OK() {
+		return ImportResult{}, errors.New(validation.Error())
+	}
 	report := ImportReport{StartedAt: time.Now(), DryRun: req.DryRun}
 	concurrency := normalizeConcurrency(req.Concurrency)
 	j.Log("info", "读取导出包：%s，共 %d 个项目", exportPath, len(manifest.Items))
+	j.Log("info", "导出包校验通过：检查 %d 个文件", validation.CheckedFiles)
 	j.Log("info", "导入并发数：%d", concurrency)
 	if req.DryRun {
 		j.Log("info", "[DRY] 本次只验证匹配，不会写入元数据和图片")
