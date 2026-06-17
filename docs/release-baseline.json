@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "currentAcceptedBaseline": {
+    "name": "person-avatar-compatibility-baseline",
+    "gitCommit": "8c42aed2ee34524165c9c69f2cbee5832de38c96",
+    "dockerImage": "czppwa/emby-migrator:sha-8c42aed",
+    "dockerLatestObservedAt": "2026-06-16T13:05:08Z",
+    "dockerShaTagObservedAt": "2026-06-16T13:05:10Z",
+    "status": "accepted-rollback-baseline",
+    "scope": [
+      "Emby 4.9.5 person avatar lookup fallback",
+      "portable metadata payload cleanup",
+      "media image import/export",
+      "metadata import/export",
+      "person image import/export"
+    ],
+    "knownRollbackCommand": "docker pull czppwa/emby-migrator:sha-8c42aed",
+    "notes": "Use this sha tag instead of latest when rolling back. Do not store server addresses, SSH credentials, API keys, or tokens in this file."
+  },
+  "previousRollbackPoints": [
+    {
+      "dockerImage": "czppwa/emby-migrator:sha-f0a58c2",
+      "scope": "early Emby 4.8.11 stable rollback point"
+    }
+  ],
+  "documentation": {
+    "blueprint": "docs/PROJECT_BLUEPRINT.md",
+    "workflow": "docs/DEVELOPMENT_WORKFLOW.md",
+    "remoteTestingRunbook": "docs/REMOTE_VERSION_TESTING.md",
+    "remoteTestReportTemplate": "docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md",
+    "rollbackGuide": "docs/ROLLBACK.md"
+  }
+}

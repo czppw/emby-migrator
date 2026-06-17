@@ -8,6 +8,7 @@
 - Git commit：`8c42aed2ee34524165c9c69f2cbee5832de38c96`
 - 说明：修复 Emby 4.9.5 人物头像查找后的验收基线。
 - Docker Hub `latest` 在记录时仍对应该功能基线，但实际回滚必须使用 `sha-8c42aed`，不要依赖 `latest`。
+- 机器可读记录：`docs/release-baseline.json`
 
 ## 2. 回滚前检查
 
@@ -96,6 +97,6 @@ http://服务器IP:8787
 
 1. 在 `docs/PROJECT_BLUEPRINT.md` 的“已知回滚点”更新当前验收基线。
 2. 在本文第 1 节更新首选回滚镜像和 Git commit。
-3. 在远端测试报告中记录新基线。
-4. 使用 `[skip ci]` 提交纯文档更新，避免不必要地覆盖 Docker Hub `latest`。
-
+3. 在 `docs/release-baseline.json` 更新机器可读基线。
+4. 在远端测试报告中记录新基线。
+5. 使用 `[skip ci]` 提交纯文档更新，避免不必要地覆盖 Docker Hub `latest`。

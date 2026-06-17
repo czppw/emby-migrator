@@ -9,6 +9,7 @@
 1. `docs/PROJECT_BLUEPRINT.md`
 2. `docs/REMOTE_VERSION_TESTING.md`
 3. `docs/ROLLBACK.md`
+4. `docs/release-baseline.json`
 
 如果本轮涉及最终交付或大版本兼容测试，还必须使用：
 
@@ -115,8 +116,9 @@ Docker Hub workflow 已对 `docs/**` 和仓库根目录 Markdown 文件设置路
 
 1. 更新 `docs/PROJECT_BLUEPRINT.md` 的当前验收基线。
 2. 更新 `docs/ROLLBACK.md` 的当前首选回滚基线。
-3. 在测试报告中记录新基线。
-4. 使用 `[skip ci]` 提交纯文档基线更新。
+3. 更新 `docs/release-baseline.json` 的机器可读基线。
+4. 在测试报告中记录新基线。
+5. 使用 `[skip ci]` 提交纯文档基线更新。
 
 如果新版本失败，按 `docs/ROLLBACK.md` 回滚到当前验收基线。
 
