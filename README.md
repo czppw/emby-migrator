@@ -42,6 +42,14 @@ docker run -d \
 http://服务器IP:8787
 ```
 
+检查服务是否启动：
+
+```bash
+curl http://服务器IP:8787/api/health
+```
+
+镜像也内置 Docker `HEALTHCHECK`，容器启动后可用 `docker ps` 查看健康状态。
+
 默认使用 host 网络模式，容器内访问 `127.0.0.1` 就是宿主机本机，方便连接本机 Emby、代理或反向代理。host 模式下不需要 `-p` 端口映射；如果宿主机 `8787` 已被占用，可以增加 `-e EMBY_MIGRATOR_ADDR=:8788` 改端口。
 
 导出完成后，导出包会在宿主机：
@@ -90,6 +98,12 @@ go run ./cmd/server
 
 ```text
 http://localhost:8787
+```
+
+本地健康检查：
+
+```bash
+curl http://localhost:8787/api/health
 ```
 
 ## 安全说明

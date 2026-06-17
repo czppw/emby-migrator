@@ -46,6 +46,12 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 	client := app.Client()
 	client.Jar = jar
 
+	var health map[string]any
+	getJSON(t, client, app.URL+"/api/health", &health, http.StatusOK)
+	if health["ok"] != true || stringField(t, health, "toolVersion") != "smoke-test" {
+		t.Fatalf("unexpected health response: %#v", health)
+	}
+
 	postJSON(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, nil, http.StatusOK)
 
 	var connection map[string]any

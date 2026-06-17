@@ -22,4 +22,5 @@ ENV EMBY_MIGRATOR_ADDR=:8787 \
 
 EXPOSE 8787
 VOLUME ["/data", "/config"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD port="${EMBY_MIGRATOR_ADDR##*:}"; [ -n "$port" ] || port=8787; wget -qO- "http://127.0.0.1:${port}/api/health" >/dev/null || exit 1
 ENTRYPOINT ["/app/emby-migrator"]

@@ -69,6 +69,7 @@ func NewServer(cfg config.Config, jobs *job.Manager, exporter *exporter.Service)
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
@@ -86,6 +87,14 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /api/jobs/{id}/logs.txt", s.requireAuth(http.HandlerFunc(s.handleJobLogDownload)))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return recoverJSON(mux)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"toolVersion": s.cfg.Version,
+		"time":        beijingTime(time.Now()).Format(time.RFC3339),
+	})
 }
 
 func (s *Server) handleConnectionTest(w http.ResponseWriter, r *http.Request) {
