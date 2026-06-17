@@ -94,6 +94,7 @@ go build ./cmd/server
 8. 向用户说明测试结果、镜像标签、回滚标签。
 
 纯文档变更使用 `[skip ci]`，避免不必要地覆盖 Docker Hub `latest`。
+Docker Hub workflow 已对 `docs/**` 和仓库根目录 Markdown 文件设置路径忽略；纯文档更新不应触发镜像构建。涉及代码、Dockerfile、workflow 或发布逻辑的变更仍需按发布流程确认 Docker Hub 标签。
 
 ## 8. 验收前交付物
 
@@ -132,4 +133,3 @@ go build ./cmd/server
 - 已验证的重大 bug 和修复结论。
 
 敏感连接信息只允许保存在本地私密上下文，不进仓库。
-
