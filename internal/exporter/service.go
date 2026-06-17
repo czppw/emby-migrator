@@ -184,6 +184,24 @@ type importItemResult struct {
 	Match ImportMatch
 }
 
+type importLookupCache struct {
+	mu          sync.Mutex
+	itemCalls   map[string]*itemLookupCall
+	personCalls map[string]*personLookupCall
+}
+
+type itemLookupCall struct {
+	ready chan struct{}
+	items []emby.Item
+	err   error
+}
+
+type personLookupCall struct {
+	ready  chan struct{}
+	person emby.Person
+	err    error
+}
+
 type personImageTask struct {
 	Name string
 	Path string
@@ -192,6 +210,96 @@ type personImageTask struct {
 type personImageResult struct {
 	Name string
 	Err  error
+}
+
+func newImportLookupCache() *importLookupCache {
+	return &importLookupCache{
+		itemCalls:   map[string]*itemLookupCall{},
+		personCalls: map[string]*personLookupCall{},
+	}
+}
+
+func (c *importLookupCache) searchItems(ctx context.Context, client *emby.Client, searchTerm, includeTypes string, limit int) ([]emby.Item, error) {
+	key := fmt.Sprintf("search:%s:%s:%d", strings.ToLower(strings.TrimSpace(searchTerm)), strings.ToLower(strings.TrimSpace(includeTypes)), limit)
+	return c.itemLookup(ctx, key, func() ([]emby.Item, error) {
+		return client.SearchItems(ctx, searchTerm, includeTypes, limit)
+	})
+}
+
+func (c *importLookupCache) itemsByProviderID(ctx context.Context, client *emby.Client, providerID string) ([]emby.Item, error) {
+	key := "provider:" + strings.ToLower(strings.TrimSpace(providerID))
+	return c.itemLookup(ctx, key, func() ([]emby.Item, error) {
+		return client.ItemsByProviderID(ctx, providerID)
+	})
+}
+
+func (c *importLookupCache) findPersonByName(ctx context.Context, client *emby.Client, name string) (emby.Person, error) {
+	key := "person:" + strings.ToLower(strings.TrimSpace(name))
+	c.mu.Lock()
+	if call := c.personCalls[key]; call != nil {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return emby.Person{}, ctx.Err()
+		case <-call.ready:
+			return call.person, call.err
+		}
+	}
+	call := &personLookupCall{ready: make(chan struct{})}
+	c.personCalls[key] = call
+	c.mu.Unlock()
+
+	call.person, call.err = findPersonByNameCached(ctx, client, name)
+	close(call.ready)
+	return call.person, call.err
+}
+
+func (c *importLookupCache) itemLookup(ctx context.Context, key string, fetch func() ([]emby.Item, error)) ([]emby.Item, error) {
+	c.mu.Lock()
+	if call := c.itemCalls[key]; call != nil {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-call.ready:
+			return cloneItems(call.items), call.err
+		}
+	}
+	call := &itemLookupCall{ready: make(chan struct{})}
+	c.itemCalls[key] = call
+	c.mu.Unlock()
+
+	call.items, call.err = fetch()
+	close(call.ready)
+	return cloneItems(call.items), call.err
+}
+
+func cloneItems(items []emby.Item) []emby.Item {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]emby.Item, len(items))
+	copy(out, items)
+	return out
+}
+
+func findPersonByNameCached(ctx context.Context, client *emby.Client, name string) (emby.Person, error) {
+	person, err := client.FindPersonByName(ctx, name)
+	if err == nil && strings.TrimSpace(string(person.ID)) != "" {
+		return person, nil
+	}
+	searchErr := err
+	person, err = client.Person(ctx, name)
+	if err != nil && searchErr != nil {
+		return emby.Person{}, fmt.Errorf("find target person by name failed: search: %v; direct: %w", searchErr, err)
+	}
+	if err != nil {
+		return emby.Person{}, fmt.Errorf("find target person by name failed: %w", err)
+	}
+	if strings.TrimSpace(string(person.ID)) == "" {
+		return emby.Person{}, fmt.Errorf("target person %q has empty id", name)
+	}
+	return person, nil
 }
 
 type ExportOptions struct {
@@ -1120,7 +1228,8 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	if req.DryRun {
 		j.Log("info", "[DRY] 本次只验证匹配，不会写入元数据和图片")
 	}
-	itemResults, err := s.importItems(ctx, j, client, exportPath, manifest.Items, req, concurrency)
+	cache := newImportLookupCache()
+	itemResults, err := s.importItems(ctx, j, client, cache, exportPath, manifest.Items, req, concurrency)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -1130,7 +1239,7 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 		addImportMatchSummary(&report, match, req.DryRun)
 	}
 	if !req.SkipImages && req.IncludePeopleImages {
-		if err := s.importPeopleImages(ctx, client, exportPath, manifest, &report, j, req.DryRun, concurrency); err != nil {
+		if err := s.importPeopleImages(ctx, client, cache, exportPath, manifest, &report, j, req.DryRun, concurrency); err != nil {
 			return ImportResult{}, err
 		}
 	}
@@ -1208,7 +1317,7 @@ func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool)
 	report.Summary.ItemImagesFailed += match.ImageFailures
 }
 
-func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Client, exportPath string, items []storage.ItemEntry, req ImportRequest, concurrency int) ([]importItemResult, error) {
+func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Client, cache *importLookupCache, exportPath string, items []storage.ItemEntry, req ImportRequest, concurrency int) ([]importItemResult, error) {
 	results := make([]importItemResult, len(items))
 	if len(items) == 0 {
 		return results, nil
@@ -1225,7 +1334,7 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 	for i := 0; i < workers; i++ {
 		go func() {
 			for task := range taskCh {
-				match := s.importItem(ctx, client, exportPath, task.Item, req)
+				match := s.importItem(ctx, client, cache, exportPath, task.Item, req)
 				resultCh <- importItemResult{Index: task.Index, Match: match}
 			}
 		}()
@@ -1273,14 +1382,14 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 	return results, nil
 }
 
-func (s *Service) importItem(ctx context.Context, client *emby.Client, exportPath string, entry storage.ItemEntry, req ImportRequest) ImportMatch {
+func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, entry storage.ItemEntry, req ImportRequest) ImportMatch {
 	match := ImportMatch{StableKey: entry.StableKey, SourceName: entry.Name}
 	var target emby.Item
 	var candidates []emby.Item
 	var reason string
 	err := retryWithTimeout(ctx, importRetryAttempts, importMatchTimeout, func(attemptCtx context.Context) error {
 		var attemptErr error
-		target, candidates, reason, attemptErr = FindMatch(attemptCtx, client, entry)
+		target, candidates, reason, attemptErr = findMatchWithCache(attemptCtx, client, cache, entry)
 		return attemptErr
 	})
 	if err != nil {
@@ -1588,7 +1697,7 @@ func setIfNotEmpty(raw map[string]any, key, value string) {
 	}
 }
 
-func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, exportPath string, manifest storage.Manifest, report *ImportReport, j *job.Job, dryRun bool, concurrency int) error {
+func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, manifest storage.Manifest, report *ImportReport, j *job.Job, dryRun bool, concurrency int) error {
 	tasks := make([]personImageTask, 0)
 	for _, person := range manifest.People {
 		if person.Image == nil || person.Name == "" {
@@ -1614,7 +1723,7 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, e
 	for i := 0; i < workers; i++ {
 		go func() {
 			for task := range taskCh {
-				resultCh <- s.importPersonImage(ctx, client, exportPath, task)
+				resultCh <- s.importPersonImage(ctx, client, cache, exportPath, task)
 			}
 		}()
 	}
@@ -1664,7 +1773,7 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, e
 	return nil
 }
 
-func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, exportPath string, task personImageTask) personImageResult {
+func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, task personImageTask) personImageResult {
 	imagePath, err := safePackagePath(exportPath, task.Path)
 	if err != nil {
 		return personImageResult{Name: task.Name, Err: fmt.Errorf("头像路径无效: %w", err)}
@@ -1673,8 +1782,16 @@ func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, ex
 	if err != nil {
 		return personImageResult{Name: task.Name, Err: fmt.Errorf("读取头像失败: %w", err)}
 	}
+	person, err := cache.findPersonByName(ctx, client, task.Name)
+	if err != nil {
+		return personImageResult{Name: task.Name, Err: err}
+	}
+	personID := strings.TrimSpace(string(person.ID))
+	if personID == "" {
+		return personImageResult{Name: task.Name, Err: fmt.Errorf("target person %q has empty id", task.Name)}
+	}
 	if err := retryWithTimeout(ctx, importRetryAttempts, personImageUploadTimeout, func(attemptCtx context.Context) error {
-		return client.UploadPersonImage(attemptCtx, task.Name, data)
+		return client.UploadPersonImageByID(attemptCtx, personID, data)
 	}); err != nil {
 		return personImageResult{Name: task.Name, Err: err}
 	}
@@ -1682,6 +1799,10 @@ func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, ex
 }
 
 func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry) (emby.Item, []emby.Item, string, error) {
+	return findMatchWithCache(ctx, client, newImportLookupCache(), entry)
+}
+
+func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importLookupCache, entry storage.ItemEntry) (emby.Item, []emby.Item, string, error) {
 	var firstSearchErr error
 	var firstAmbiguous []emby.Item
 	var firstAmbiguousReason string
@@ -1697,7 +1818,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 		}
 	}
 	if stem := mediaPathStem(entry.Path); stem != "" {
-		items, err := client.SearchItems(ctx, searchPrefix(stem, 30), entry.Type, 50)
+		items, err := cache.searchItems(ctx, client, searchPrefix(stem, 30), entry.Type, 50)
 		if err == nil {
 			if entry.Type == "Season" {
 				matches := seasonMatches(entry, items)
@@ -1723,7 +1844,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 
 	providerValues := providerIDsForSearch(entry.ProviderIDs)
 	for _, value := range providerValues {
-		items, err := client.ItemsByProviderID(ctx, value)
+		items, err := cache.itemsByProviderID(ctx, client, value)
 		if err == nil && len(items) == 1 {
 			return items[0], items, "provider-id", nil
 		}
@@ -1735,7 +1856,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 		}
 	}
 	if entry.Type == "Episode" && entry.SeriesName != "" {
-		items, err := client.SearchItems(ctx, entry.SeriesName, "Episode", 300)
+		items, err := cache.searchItems(ctx, client, entry.SeriesName, "Episode", 300)
 		if err == nil {
 			matches := episodeMatches(entry, items)
 			if len(matches) == 1 {
@@ -1750,7 +1871,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 	}
 	if entry.Type == "Season" {
 		for _, term := range seasonSearchTerms(entry) {
-			items, err := client.SearchItems(ctx, term, "Season", 300)
+			items, err := cache.searchItems(ctx, client, term, "Season", 300)
 			if err != nil {
 				rememberSearchErr(err)
 				continue
@@ -1765,7 +1886,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 		}
 	}
 	if strings.TrimSpace(entry.Name) != "" {
-		items, err := client.SearchItems(ctx, entry.Name, entry.Type, 20)
+		items, err := cache.searchItems(ctx, client, entry.Name, entry.Type, 20)
 		if err == nil {
 			exact := exactNameMatches(items, entry.Name, entry.Type)
 			if item, matches, ok := chooseUniqueMatch(exact, entry.ProductionYear); ok {
@@ -1783,7 +1904,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 	}
 	shortName := ShortName(entry.Name)
 	if shortName != "" && shortName != entry.Name {
-		items, err := client.SearchItems(ctx, shortName, entry.Type, 20)
+		items, err := cache.searchItems(ctx, client, shortName, entry.Type, 20)
 		if err == nil && len(items) > 0 {
 			exact := exactNameMatches(items, shortName, entry.Type)
 			if item, matches, ok := chooseUniqueMatch(exact, entry.ProductionYear); ok {
@@ -1798,7 +1919,7 @@ func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry
 		}
 	}
 	if entry.OriginalTitle != "" && entry.OriginalTitle != entry.Name {
-		items, err := client.SearchItems(ctx, entry.OriginalTitle, entry.Type, 20)
+		items, err := cache.searchItems(ctx, client, entry.OriginalTitle, entry.Type, 20)
 		if err == nil && len(items) > 0 {
 			exact := originalTitleMatches(items, entry.OriginalTitle, entry.Type)
 			if item, matches, ok := chooseUniqueMatch(exact, entry.ProductionYear); ok {

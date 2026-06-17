@@ -741,7 +741,7 @@ func TestImportItemStillUploadsImagesWhenMetadataUpdateFails(t *testing.T) {
 	}
 	client.HTTPClient = server.Client()
 
-	match := NewService(exportPath).importItem(context.Background(), client, exportPath, storage.ItemEntry{
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name:     "Movie With Poster",
 		Type:     "Movie",
 		InfoPath: infoRel,
@@ -807,7 +807,7 @@ func TestImportItemFallsBackToMinimalMetadataPayloadOnSourceNullError(t *testing
 	}
 	client.HTTPClient = server.Client()
 
-	match := NewService(exportPath).importItem(context.Background(), client, exportPath, storage.ItemEntry{
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name:     "Episode With Strict Payload",
 		Type:     "Episode",
 		InfoPath: infoRel,
@@ -817,6 +817,97 @@ func TestImportItemFallsBackToMinimalMetadataPayloadOnSourceNullError(t *testing
 	}
 	if fullAttempts != 1 || minimalAttempts != 1 {
 		t.Fatalf("attempts full=%d minimal=%d, want 1/1", fullAttempts, minimalAttempts)
+	}
+}
+
+func TestImportLookupCacheReusesProviderIDSearches(t *testing.T) {
+	providerQueries := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("AnyProviderIdEquals") == "Tmdb.123":
+			providerQueries++
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Movie", "Name": "Cached Provider Movie", "ProviderIds": map[string]string{"Tmdb": "123"}},
+				},
+				"TotalRecordCount": 1,
+			})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	cache := newImportLookupCache()
+	entry := storage.ItemEntry{
+		Type:        "Movie",
+		Name:        "Cached Provider Movie",
+		ProviderIDs: map[string]string{"Tmdb": "123"},
+	}
+	for i := 0; i < 2; i++ {
+		target, _, reason, err := findMatchWithCache(context.Background(), client, cache, entry)
+		if err != nil {
+			t.Fatalf("findMatchWithCache returned error: %v", err)
+		}
+		if target.ID != "target-id" || reason != "provider-id" {
+			t.Fatalf("target=%#v reason=%q, want provider-id target", target, reason)
+		}
+	}
+	if providerQueries != 1 {
+		t.Fatalf("provider ID search count = %d, want 1", providerQueries)
+	}
+}
+
+func TestImportPersonImageCachesPersonLookupByName(t *testing.T) {
+	exportPath := t.TempDir()
+	imageRel := "people/actor/primary.jpg"
+	if _, err := storage.WriteBytes(filepath.Join(exportPath, filepath.FromSlash(imageRel)), []byte("avatar")); err != nil {
+		t.Fatal(err)
+	}
+	personQueries := 0
+	uploads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Persons":
+			personQueries++
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "person-target-id", "Name": "Actor One"},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/person-target-id/Images/Primary":
+			uploads++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	cache := newImportLookupCache()
+	service := NewService(exportPath)
+	for i := 0; i < 2; i++ {
+		result := service.importPersonImage(context.Background(), client, cache, exportPath, personImageTask{Name: "Actor One", Path: imageRel})
+		if result.Err != nil {
+			t.Fatalf("importPersonImage returned error: %v", result.Err)
+		}
+	}
+	if personQueries != 1 {
+		t.Fatalf("person lookup count = %d, want 1", personQueries)
+	}
+	if uploads != 2 {
+		t.Fatalf("uploads = %d, want 2", uploads)
 	}
 }
 

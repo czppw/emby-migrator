@@ -757,6 +757,17 @@ func (c *Client) UploadImage(ctx context.Context, itemID, imageType string, data
 	return c.uploadImagePath(ctx, "/Items/"+url.PathEscape(itemID)+"/Images/"+url.PathEscape(imageType), data)
 }
 
+func (c *Client) UploadPersonImageByID(ctx context.Context, personID string, data []byte) error {
+	id := strings.TrimSpace(personID)
+	if id == "" {
+		return fmt.Errorf("target person id is required")
+	}
+	if err := c.uploadImagePath(ctx, "/Items/"+url.PathEscape(id)+"/Images/Primary", data); err != nil {
+		return fmt.Errorf("upload person image by target person id failed: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) UploadPersonImage(ctx context.Context, name string, data []byte) error {
 	person, err := c.FindPersonByName(ctx, name)
 	if err != nil || strings.TrimSpace(string(person.ID)) == "" {
@@ -773,10 +784,7 @@ func (c *Client) UploadPersonImage(ctx context.Context, name string, data []byte
 	if id == "" {
 		return fmt.Errorf("target person %q has empty id", name)
 	}
-	if err := c.uploadImagePath(ctx, "/Items/"+url.PathEscape(id)+"/Images/Primary", data); err != nil {
-		return fmt.Errorf("upload person image by target person id failed: %w", err)
-	}
-	return nil
+	return c.UploadPersonImageByID(ctx, id, data)
 }
 
 func (c *Client) uploadImagePath(ctx context.Context, endpoint string, data []byte) error {
