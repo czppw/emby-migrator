@@ -123,7 +123,7 @@ docker run -d \
 
 ## 6. 必须记录的测试结果
 
-每次远端大版本测试结束后，在开发记录或交付说明中记录：
+每次远端大版本测试结束后，使用 `docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md` 填写测试报告，并在开发记录或交付说明中记录：
 
 - 测试镜像标签。
 - Git commit。
@@ -159,4 +159,3 @@ docker run -d \
 - Docker Hub 发布状态明确。
 - 回滚标签明确。
 - 蓝图或关键上下文快照已更新。
-
