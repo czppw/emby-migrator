@@ -26,6 +26,7 @@
   const MAX_LOG_LINES = 800;
   const THEME_STORAGE_KEY = "embyMigratorTheme";
   const CONNECTION_STORAGE_KEY = "embyMigrator.connection";
+  const TASK_PREFS_STORAGE_KEY = "embyMigrator.taskPrefs";
   const LEGACY_SERVER_URL_KEY = "embyMigrator.serverUrl";
   const DEFAULT_CONCURRENCY = 4;
 
@@ -71,6 +72,7 @@
     renderImageTypes("exportImageTypes", "export");
     renderImageTypes("importImageTypes", "import");
     restoreConnection();
+    restoreTaskPreferences();
     bindEvents();
     updateControls();
     checkAuth();
@@ -170,10 +172,17 @@
 
     [
       els.exportSkipImages,
+      els.exportIncremental,
+      els.exportOverwrite,
       els.importSkipImages,
+      els.importOverwrite,
       els.exportIncludePeopleImages,
       els.importIncludePeopleImages,
-    ].forEach((input) => input.addEventListener("change", updateControls));
+    ].forEach((input) => input.addEventListener("change", handleTaskPreferenceChanged));
+    [els.exportConcurrency, els.importConcurrency].forEach((input) => {
+      input.addEventListener("change", handleTaskPreferenceChanged);
+      input.addEventListener("blur", handleTaskPreferenceChanged);
+    });
   }
 
   function initTheme() {
@@ -325,6 +334,67 @@
     clearStoredConnection();
   }
 
+  function restoreTaskPreferences() {
+    const prefs = readTaskPreferences();
+    applyGroupPreferences("export", prefs.export || {});
+    applyGroupPreferences("import", prefs.import || {});
+  }
+
+  function readTaskPreferences() {
+    try {
+      const raw = window.localStorage.getItem(TASK_PREFS_STORAGE_KEY);
+      if (!raw) {
+        return {};
+      }
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      window.localStorage.removeItem(TASK_PREFS_STORAGE_KEY);
+      return {};
+    }
+  }
+
+  function applyGroupPreferences(group, prefs) {
+    if (!prefs || typeof prefs !== "object") {
+      return;
+    }
+    const prefix = group === "export" ? "export" : "import";
+    setChecked(`${prefix}SkipImages`, prefs.skipImages);
+    if (group === "export") {
+      setChecked("exportIncremental", prefs.incremental);
+    }
+    setChecked(`${prefix}Overwrite`, prefs.overwrite);
+    setChecked(`${prefix}IncludePeopleImages`, prefs.includePeopleImages);
+    if (Number.isFinite(Number(prefs.concurrency))) {
+      els[`${prefix}Concurrency`].value = String(Math.max(1, Number.parseInt(prefs.concurrency, 10)));
+    }
+    if (Array.isArray(prefs.imageTypes)) {
+      setCheckedImageTypes(group, prefs.imageTypes);
+    }
+  }
+
+  function setChecked(id, value) {
+    if (value === undefined || value === null || !els[id]) {
+      return;
+    }
+    els[id].checked = Boolean(value);
+  }
+
+  function persistTaskPreferences() {
+    const prefs = {
+      export: collectExportOptions(),
+      import: collectImportOptions({ dryRun: false }),
+    };
+    prefs.export.imageTypes = getCheckedImageTypes("export");
+    prefs.import.imageTypes = getCheckedImageTypes("import");
+    delete prefs.import.dryRun;
+    try {
+      window.localStorage.setItem(TASK_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {
+      // Preference persistence is a convenience; task execution must keep working.
+    }
+  }
+
   function handleConnectionInputChanged() {
     if (!state.connected && !state.hasTested) {
       return;
@@ -334,6 +404,11 @@
     setConnectionState("pending", "需重新测试");
     setNotice(els.connectionNotice, "连接信息已变更，请重新测试。");
     updateControls();
+  }
+
+  function handleTaskPreferenceChanged() {
+    updateControls();
+    persistTaskPreferences();
   }
 
   async function handleConnectionTest(event) {
@@ -491,6 +566,7 @@
     }
 
     const options = collectExportOptions();
+    persistTaskPreferences();
     const connection = getConnection();
     const payload = {
       connection,
@@ -556,6 +632,7 @@
     }
 
     const options = collectImportOptions({ dryRun });
+    persistTaskPreferences();
     const connection = getConnection();
     const payload = {
       connection,
@@ -953,7 +1030,7 @@
       checkbox.value = type;
       checkbox.checked = true;
       checkbox.dataset.imageGroup = group;
-      checkbox.addEventListener("change", updateControls);
+      checkbox.addEventListener("change", handleTaskPreferenceChanged);
 
       const text = document.createElement("span");
       text.textContent = `${IMAGE_TYPE_LABELS[type] || type} (${type})`;
@@ -967,6 +1044,13 @@
     return Array.from(
       document.querySelectorAll(`input[data-image-group="${group}"]:checked`),
     ).map((input) => input.value);
+  }
+
+  function setCheckedImageTypes(group, imageTypes) {
+    const selected = new Set(imageTypes.map((type) => String(type).toLowerCase()));
+    document.querySelectorAll(`input[data-image-group="${group}"]`).forEach((input) => {
+      input.checked = selected.has(String(input.value).toLowerCase());
+    });
   }
 
   function updateSelectedCount() {
