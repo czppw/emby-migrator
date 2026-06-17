@@ -60,15 +60,16 @@ type ImportResult struct {
 }
 
 type ImportReportInfo struct {
-	ExportName string          `json:"exportName"`
-	Name       string          `json:"name"`
-	Path       string          `json:"path"`
-	Size       int64           `json:"size"`
-	ModifiedAt time.Time       `json:"modifiedAt"`
-	DryRun     bool            `json:"dryRun"`
-	StartedAt  time.Time       `json:"startedAt,omitempty"`
-	EndedAt    time.Time       `json:"endedAt,omitempty"`
-	Summary    storage.Summary `json:"summary"`
+	ExportName    string               `json:"exportName"`
+	Name          string               `json:"name"`
+	Path          string               `json:"path"`
+	Size          int64                `json:"size"`
+	ModifiedAt    time.Time            `json:"modifiedAt"`
+	DryRun        bool                 `json:"dryRun"`
+	StartedAt     time.Time            `json:"startedAt,omitempty"`
+	EndedAt       time.Time            `json:"endedAt,omitempty"`
+	Compatibility CompatibilityProfile `json:"compatibility"`
+	Summary       storage.Summary      `json:"summary"`
 }
 
 type PackageValidation struct {
@@ -78,14 +79,22 @@ type PackageValidation struct {
 	Errors       []string `json:"errors,omitempty"`
 }
 
+type CompatibilityProfile struct {
+	Name          string   `json:"name"`
+	SourceVersion string   `json:"sourceVersion,omitempty"`
+	TargetVersion string   `json:"targetVersion,omitempty"`
+	Notes         []string `json:"notes,omitempty"`
+}
+
 type ImportReport struct {
-	StartedAt     time.Time       `json:"startedAt"`
-	EndedAt       time.Time       `json:"endedAt"`
-	DryRun        bool            `json:"dryRun"`
-	Matches       []ImportMatch   `json:"matches"`
-	PersonMatches []ImportMatch   `json:"personMatches,omitempty"`
-	Summary       storage.Summary `json:"summary"`
-	WritesSkipped int             `json:"writesSkipped,omitempty"`
+	StartedAt     time.Time            `json:"startedAt"`
+	EndedAt       time.Time            `json:"endedAt"`
+	DryRun        bool                 `json:"dryRun"`
+	Compatibility CompatibilityProfile `json:"compatibility"`
+	Matches       []ImportMatch        `json:"matches"`
+	PersonMatches []ImportMatch        `json:"personMatches,omitempty"`
+	Summary       storage.Summary      `json:"summary"`
+	WritesSkipped int                  `json:"writesSkipped,omitempty"`
 }
 
 type ImportMatch struct {
@@ -488,15 +497,16 @@ func (s *Service) ListImportReports(exportPath string) ([]ImportReportInfo, erro
 			return nil, fmt.Errorf("read import report %s: %w", entry.Name(), err)
 		}
 		out = append(out, ImportReportInfo{
-			ExportName: exportName,
-			Name:       entry.Name(),
-			Path:       filepath.ToSlash(filepath.Join(exportName, entry.Name())),
-			Size:       info.Size(),
-			ModifiedAt: info.ModTime(),
-			DryRun:     report.DryRun,
-			StartedAt:  report.StartedAt,
-			EndedAt:    report.EndedAt,
-			Summary:    report.Summary,
+			ExportName:    exportName,
+			Name:          entry.Name(),
+			Path:          filepath.ToSlash(filepath.Join(exportName, entry.Name())),
+			Size:          info.Size(),
+			ModifiedAt:    info.ModTime(),
+			DryRun:        report.DryRun,
+			StartedAt:     report.StartedAt,
+			EndedAt:       report.EndedAt,
+			Compatibility: report.Compatibility,
+			Summary:       report.Summary,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -526,6 +536,52 @@ func (s *Service) ImportReportPath(exportPath, reportName string) (string, error
 
 func isImportReportFile(name string) bool {
 	return strings.HasPrefix(name, "import-report-") && strings.HasSuffix(name, ".json")
+}
+
+func BuildCompatibilityProfile(sourceVersion, targetVersion string) CompatibilityProfile {
+	profile := CompatibilityProfile{
+		Name:          "emby-generic",
+		SourceVersion: strings.TrimSpace(sourceVersion),
+		TargetVersion: strings.TrimSpace(targetVersion),
+		Notes: []string{
+			"导入匹配不依赖旧 Emby 内部 ID",
+			"人物字段回写会移除旧服务器人物 ID",
+		},
+	}
+	major, minor, ok := parseMajorMinor(targetVersion)
+	switch {
+	case ok && major == 4 && minor >= 9:
+		profile.Name = "emby-4.9-strict"
+		profile.Notes = append(profile.Notes,
+			"目标 Emby 4.9+ 使用严格元数据兼容策略",
+			"元数据回写失败时会降级为最小安全 payload 重试",
+			"人物头像优先通过 /Persons 搜索目标人物 ID 后上传",
+		)
+	case ok && major == 4 && minor <= 8:
+		profile.Name = "emby-4.8-classic"
+		profile.Notes = append(profile.Notes,
+			"目标 Emby 4.8 使用经典兼容策略",
+			"保留 4.8 可接受的元数据字段清洗逻辑",
+		)
+	default:
+		profile.Notes = append(profile.Notes,
+			"目标版本无法识别，使用通用兼容策略",
+		)
+	}
+	return profile
+}
+
+func parseMajorMinor(version string) (int, int, bool) {
+	parts := strings.Split(strings.TrimSpace(version), ".")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	minor, errMinor := strconv.Atoi(parts[1])
+	if errMajor != nil || errMinor != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 func ValidateExportPackage(exportPath string, manifest storage.Manifest) PackageValidation {
@@ -1205,8 +1261,12 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	if err != nil {
 		return ImportResult{}, err
 	}
+	var targetInfo emby.SystemInfo
 	if info, err := client.SystemInfo(ctx); err == nil {
+		targetInfo = info
 		j.Log("info", "连接到目标 Emby %s (%s)", info.ServerName, info.Version)
+	} else {
+		j.Log("warn", "读取目标 Emby 版本失败，使用通用兼容策略：%v", err)
 	}
 	exportPath, _, err := s.ResolveExportPath(req.ExportPath)
 	if err != nil {
@@ -1220,10 +1280,12 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	if !validation.OK() {
 		return ImportResult{}, errors.New(validation.Error())
 	}
-	report := ImportReport{StartedAt: time.Now(), DryRun: req.DryRun}
+	profile := BuildCompatibilityProfile(manifest.EmbyVersion, targetInfo.Version)
+	report := ImportReport{StartedAt: time.Now(), DryRun: req.DryRun, Compatibility: profile}
 	concurrency := normalizeConcurrency(req.Concurrency)
 	j.Log("info", "读取导出包：%s，共 %d 个项目", exportPath, len(manifest.Items))
 	j.Log("info", "导出包校验通过：检查 %d 个文件", validation.CheckedFiles)
+	j.Log("info", "兼容策略：%s（源 Emby %s -> 目标 Emby %s）", profile.Name, emptyDash(profile.SourceVersion), emptyDash(profile.TargetVersion))
 	j.Log("info", "导入并发数：%d", concurrency)
 	if req.DryRun {
 		j.Log("info", "[DRY] 本次只验证匹配，不会写入元数据和图片")
@@ -1294,6 +1356,13 @@ func reportElapsed(report ImportReport) time.Duration {
 		return 0
 	}
 	return end.Sub(report.StartedAt)
+}
+
+func emptyDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }
 
 func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool) {

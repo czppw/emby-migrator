@@ -899,6 +899,7 @@
         dryRun: Boolean(readFirst(raw, ["dryRun", "DryRun"])),
         startedAt: readFirst(raw, ["startedAt", "StartedAt", "modifiedAt", "ModifiedAt"]),
         endedAt: readFirst(raw, ["endedAt", "EndedAt"]),
+        compatibility: safeObject(readFirst(raw, ["compatibility", "Compatibility"])),
         summary,
       };
     });
@@ -999,13 +1000,14 @@
     const summary = safeObject(report.summary);
     const mode = report.dryRun ? "预检" : "导入";
     const time = formatShortTime(report.endedAt || report.startedAt);
+    const profile = readFirst(safeObject(report.compatibility), ["name", "Name"]);
     const total = numberValue(summary.items) || numberValue(summary.matched) + numberValue(summary.unmatched) + numberValue(summary.ambiguous) + numberValue(summary.errors);
     const risks = [
       numberValue(summary.unmatched) ? `未匹配 ${numberValue(summary.unmatched)}` : "",
       numberValue(summary.ambiguous) ? `歧义 ${numberValue(summary.ambiguous)}` : "",
       numberValue(summary.errors) ? `错误 ${numberValue(summary.errors)}` : "",
     ].filter(Boolean);
-    return [mode, time, total ? `${total} 项` : "", risks.join(" / ") || "无异常", report.name]
+    return [mode, time, profile, total ? `${total} 项` : "", risks.join(" / ") || "无异常", report.name]
       .filter(Boolean)
       .join(" · ");
   }
@@ -1239,6 +1241,7 @@
     }
 
     const summary = safeObject(readFirst(report, ["summary", "Summary"]));
+    const compatibility = safeObject(readFirst(report, ["compatibility", "Compatibility"]));
     const matches = Array.isArray(report.matches) ? report.matches : [];
     const dryRun = Boolean(readFirst(report, ["dryRun", "DryRun"]));
     const total = matches.length || numberValue(summary.items);
@@ -1269,6 +1272,12 @@
         ? "导入完成，但存在需要复查的问题。"
         : "导入完成，未发现异常统计。";
     heading.append(title, hint);
+    const profileName = readFirst(compatibility, ["name", "Name"]);
+    if (profileName) {
+      const profile = document.createElement("span");
+      profile.textContent = `兼容策略：${profileName}`;
+      heading.appendChild(profile);
+    }
     els.importReport.appendChild(heading);
 
     const stats = document.createElement("div");

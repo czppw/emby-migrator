@@ -208,6 +208,30 @@ func TestValidateExportPackagePassesCompletePackage(t *testing.T) {
 	}
 }
 
+func TestBuildCompatibilityProfileDetectsTargetVersion(t *testing.T) {
+	tests := []struct {
+		target string
+		want   string
+	}{
+		{target: "4.8.11.0", want: "emby-4.8-classic"},
+		{target: "4.9.5.0", want: "emby-4.9-strict"},
+		{target: "5.0.0", want: "emby-generic"},
+		{target: "", want: "emby-generic"},
+	}
+	for _, tt := range tests {
+		got := BuildCompatibilityProfile("4.8.11.0", tt.target)
+		if got.Name != tt.want {
+			t.Fatalf("BuildCompatibilityProfile target %q = %q, want %q", tt.target, got.Name, tt.want)
+		}
+		if got.SourceVersion != "4.8.11.0" || got.TargetVersion != strings.TrimSpace(tt.target) {
+			t.Fatalf("profile versions not preserved: %#v", got)
+		}
+		if len(got.Notes) == 0 {
+			t.Fatalf("profile should include strategy notes: %#v", got)
+		}
+	}
+}
+
 func TestSummaryLines(t *testing.T) {
 	exportLine := exportSummaryLine(storage.Summary{
 		Libraries:    2,

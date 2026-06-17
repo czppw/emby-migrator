@@ -97,6 +97,10 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 	if got := boolField(t, dryRunReport, "dryRun"); !got {
 		t.Fatalf("precheck report dryRun = false, want true")
 	}
+	compatibility := objectField(t, dryRunReport, "compatibility")
+	if got := stringField(t, compatibility, "name"); got != "emby-4.8-classic" {
+		t.Fatalf("compatibility profile = %q, want emby-4.8-classic", got)
+	}
 	if got := mockState.writeCounts(); got != "updates=0 itemImages=0 peopleImages=0" {
 		t.Fatalf("precheck wrote to mock Emby: %s", got)
 	}
