@@ -4,10 +4,10 @@
 
 ## 1. 当前首选回滚基线
 
-- Docker 镜像：`czppwa/emby-migrator:sha-7dcc0e1`
-- Git commit：`7dcc0e10a63ad0dcbe84281405024849cd158c8a`
-- 说明：`0.1.0-beta.2` 验收基线，包含 Emby 4.8.11/4.9.5 双版本导出、导入、跨版本导入、人物头像、媒体图片和同名剧集匹配修复。
-- Docker Hub `latest` 在记录时对应 `sha-7dcc0e1`，但实际回滚必须使用固定 `sha-7dcc0e1`，不要依赖 `latest`。
+- Docker 镜像：`czppwa/emby-migrator:sha-97ba9d8`
+- Git commit：`97ba9d88cd6096c7b67cf6096652da92b567a362`
+- 说明：`0.1.0-beta.3` 验收基线，包含 Emby 4.8.11/4.9.5 双版本导出导入、跨版本导入、TG 中文通知、服务器地址簿、增量导出/导入增量包、基础 resume 续跑和版本显示更新。
+- Docker Hub `latest` 在记录时对应 `sha-97ba9d8`，但实际回滚必须使用固定 `sha-97ba9d8`，不要依赖 `latest`。
 - 机器可读记录：`docs/release-baseline.json`
 
 ## 2. 回滚前检查
@@ -32,7 +32,7 @@ docker logs emby-migrator > emby-migrator-before-rollback.log 2>&1
 保留宿主机数据目录和配置目录，只替换容器镜像：
 
 ```bash
-docker pull czppwa/emby-migrator:sha-7dcc0e1
+docker pull czppwa/emby-migrator:sha-97ba9d8
 
 docker rm -f emby-migrator
 
@@ -44,7 +44,7 @@ docker run -d \
   -e EMBY_MIGRATOR_PASSWORD=password \
   -v /opt/emby-migrator/data:/data \
   -v /opt/emby-migrator/config:/config \
-  czppwa/emby-migrator:sha-7dcc0e1
+  czppwa/emby-migrator:sha-97ba9d8
 ```
 
 打开页面：

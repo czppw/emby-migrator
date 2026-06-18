@@ -1,15 +1,18 @@
 {
   "schemaVersion": 1,
   "currentAcceptedBaseline": {
-    "name": "0.1.0-beta.2-dual-version-baseline",
-    "version": "0.1.0-beta.2",
-    "gitCommit": "7dcc0e10a63ad0dcbe84281405024849cd158c8a",
-    "dockerImage": "czppwa/emby-migrator:sha-7dcc0e1",
-    "dockerLatestObservedAt": "2026-06-17T07:26:22Z",
-    "dockerShaTagObservedAt": "2026-06-17T07:26:24Z",
+    "name": "0.1.0-beta.3-enhancement-baseline",
+    "version": "0.1.0-beta.3",
+    "gitCommit": "97ba9d88cd6096c7b67cf6096652da92b567a362",
+    "dockerImage": "czppwa/emby-migrator:sha-97ba9d8",
+    "dockerVersionTag": "czppwa/emby-migrator:v0.1.0-beta.3",
+    "dockerLatestObservedAt": "2026-06-18T05:05:49Z",
+    "dockerShaTagObservedAt": "2026-06-18T05:05:47Z",
+    "dockerVersionTagObservedAt": "2026-06-18T05:05:44Z",
+    "dockerDigest": "sha256:a7b8c19bc8f1a47dc1d21af94bf356afc2ac2231018a0eea03308ee9b9c30d55",
     "status": "accepted-rollback-baseline",
-    "acceptedAt": "2026-06-17T07:26:24Z",
-    "remoteTestReport": "docs/REMOTE_TEST_REPORT_20260617.md",
+    "acceptedAt": "2026-06-18T05:05:49Z",
+    "remoteTestReport": "docs/PRE_RELEASE_TEST_REPORT_20260618.md",
     "verifiedEmbyVersions": [
       "4.8.11.0",
       "4.9.5.0"
@@ -19,19 +22,38 @@
       "日韩电影"
     ],
     "scope": [
+      "single-user password entrance",
+      "server address book and saved API key reuse",
+      "source and target library loading",
       "Emby 4.8.11 and 4.9.5 export verification",
       "Emby 4.8.11 and 4.9.5 import verification",
-      "cross-version import verification for newly exported packages",
-      "same-title episode matching fix using path-series candidates",
-      "portable metadata payload cleanup",
-      "media image import/export",
-      "person image import/export",
-      "frontend/backend version display updated to 0.1.0-beta.2"
+      "cross-version import verification",
+      "incremental export and incremental-package import",
+      "resume import based on previous report",
+      "Telegram notification settings, proxy, Chinese task notifications, and server address fields",
+      "responsive UI and log download controls",
+      "frontend/backend version display updated to 0.1.0-beta.3"
     ],
-    "knownRollbackCommand": "docker pull czppwa/emby-migrator:sha-7dcc0e1",
-    "notes": "Use this sha tag instead of latest when rolling back. Do not store server addresses, SSH credentials, API keys, or tokens in this file."
+    "knownRollbackCommand": "docker pull czppwa/emby-migrator:sha-97ba9d8",
+    "notes": "Use this sha tag instead of latest when rolling back. Docker image rollback cannot undo metadata or images already written into target Emby. Do not store server addresses, SSH credentials, API keys, or tokens in this file."
   },
   "previousRollbackPoints": [
+    {
+      "dockerImage": "czppwa/emby-migrator:sha-7dcc0e1",
+      "gitCommit": "7dcc0e10a63ad0dcbe84281405024849cd158c8a",
+      "version": "0.1.0-beta.2",
+      "scope": [
+        "Emby 4.8.11 and 4.9.5 export verification",
+        "Emby 4.8.11 and 4.9.5 import verification",
+        "cross-version import verification for newly exported packages",
+        "same-title episode matching fix using path-series candidates",
+        "portable metadata payload cleanup",
+        "media image import/export",
+        "person image import/export"
+      ],
+      "acceptedAt": "2026-06-17T07:26:24Z",
+      "notes": "Previous accepted baseline before 0.1.0-beta.3."
+    },
     {
       "dockerImage": "czppwa/emby-migrator:sha-8c42aed",
       "gitCommit": "8c42aed2ee34524165c9c69f2cbee5832de38c96",
@@ -43,7 +65,7 @@
         "person image import/export"
       ],
       "acceptedAt": "2026-06-16T13:05:10Z",
-      "notes": "Previous accepted baseline before 0.1.0-beta.2."
+      "notes": "Older accepted baseline."
     },
     {
       "dockerImage": "czppwa/emby-migrator:sha-f0a58c2",
@@ -54,6 +76,7 @@
     "blueprint": "docs/PROJECT_BLUEPRINT.md",
     "workflow": "docs/DEVELOPMENT_WORKFLOW.md",
     "remoteTestingRunbook": "docs/REMOTE_VERSION_TESTING.md",
+    "preReleaseTestReport": "docs/PRE_RELEASE_TEST_REPORT_20260618.md",
     "remoteTestReportTemplate": "docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md",
     "rollbackGuide": "docs/ROLLBACK.md"
   }
