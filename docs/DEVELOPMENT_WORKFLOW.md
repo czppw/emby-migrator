@@ -15,6 +15,7 @@
 
 ```text
 docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md
+docs/templates/PRE_RELEASE_TEST_REPORT_TEMPLATE.md
 ```
 
 ## 2. 需求归类
@@ -23,8 +24,8 @@ docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md
 
 - P0 稳定化：配置、任务控制、导入预检、版本兼容、导出包校验、回归矩阵。
 - P1 性能和可靠性：并发、缓存、重试限流、断点、结构化失败报告。
-- P2 用户体验：服务器档案、对比报告、任务页面、响应式布局、中文化图片类型、部署提示。
-- P3 长期能力：可选定时备份、Telegram 通知、匹配模板、审计模式、回滚辅助、多用户权限。
+- P2 用户体验：服务器地址簿、源/目标媒体库读取、对比报告、任务页面、响应式布局、中文化图片类型、部署提示。
+- P3 长期能力：可选定时备份、TG 中文通知、匹配模板、审计模式。
 
 如果需求会影响导出、导入、匹配、元数据、图片、人物头像，默认按核心迁移逻辑处理，必须执行更完整测试。
 
@@ -80,6 +81,7 @@ go build ./cmd/server
 - 修复 Emby 4.8/4.9 兼容问题。
 
 远端实测按 `docs/REMOTE_VERSION_TESTING.md` 执行，并填写 `docs/templates/REMOTE_TEST_REPORT_TEMPLATE.md`。
+最终发布或交付验收前，还必须填写 `docs/templates/PRE_RELEASE_TEST_REPORT_TEMPLATE.md`，覆盖同服务器/不同服务器正式导入、4.8.11/4.9.5、服务器地址簿、源/目标服务器读取媒体库、TG 中文通知及服务器地址字段、API Key 持久化、权限路径和 Docker host+TZ 检查。
 
 ## 7. 发布流程
 
@@ -110,7 +112,7 @@ Docker Hub workflow 已对 `docs/**` 和仓库根目录 Markdown 文件设置路
 - 回滚命令。
 - 是否建议验收。
 
-## 9. 回滚准备
+## 9. Docker 镜像/版本回滚准备
 
 每次用户验收通过后：
 

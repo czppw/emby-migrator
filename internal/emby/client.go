@@ -578,14 +578,33 @@ func (c *Client) ListItemsPaged(ctx context.Context, query ItemsQuery) ([]Item, 
 }
 
 func (c *Client) SearchItems(ctx context.Context, searchTerm, includeTypes string, limit int) ([]Item, error) {
+	return c.SearchItemsInLibraries(ctx, searchTerm, includeTypes, limit, nil)
+}
+
+func (c *Client) SearchItemsInLibraries(ctx context.Context, searchTerm, includeTypes string, limit int, libraryIDs []string) ([]Item, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	parentIDs := normalizeLibraryIDs(libraryIDs)
+	if len(parentIDs) > 1 {
+		items := make([]Item, 0)
+		for _, parentID := range parentIDs {
+			scoped, err := c.SearchItemsInLibraries(ctx, searchTerm, includeTypes, limit, []string{parentID})
+			if err != nil {
+				return items, err
+			}
+			items = append(items, scoped...)
+		}
+		return items, nil
 	}
 	params := url.Values{
 		"Recursive":  {"true"},
 		"Fields":     {"Path,ProviderIds,People,OriginalTitle,IndexNumber,ParentIndexNumber,SeriesName,ImageTags"},
 		"Limit":      {fmt.Sprintf("%d", limit)},
 		"SearchTerm": {searchTerm},
+	}
+	if len(parentIDs) == 1 {
+		params.Set("ParentId", parentIDs[0])
 	}
 	if includeTypes != "" {
 		params.Set("IncludeItemTypes", includeTypes)
@@ -598,14 +617,52 @@ func (c *Client) SearchItems(ctx context.Context, searchTerm, includeTypes strin
 }
 
 func (c *Client) ItemsByProviderID(ctx context.Context, providerID string) ([]Item, error) {
-	var result ItemsResponse
-	err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
+	return c.ItemsByProviderIDInLibraries(ctx, providerID, nil)
+}
+
+func (c *Client) ItemsByProviderIDInLibraries(ctx context.Context, providerID string, libraryIDs []string) ([]Item, error) {
+	parentIDs := normalizeLibraryIDs(libraryIDs)
+	if len(parentIDs) > 1 {
+		items := make([]Item, 0)
+		for _, parentID := range parentIDs {
+			scoped, err := c.ItemsByProviderIDInLibraries(ctx, providerID, []string{parentID})
+			if err != nil {
+				return items, err
+			}
+			items = append(items, scoped...)
+		}
+		return items, nil
+	}
+	params := url.Values{
 		"Recursive":           {"true"},
 		"Limit":               {"10"},
 		"Fields":              {"Path,ProviderIds,OriginalTitle,IndexNumber,ParentIndexNumber,SeriesName"},
 		"AnyProviderIdEquals": {providerID},
-	}, nil, &result)
+	}
+	if len(parentIDs) == 1 {
+		params.Set("ParentId", parentIDs[0])
+	}
+	var result ItemsResponse
+	err := c.JSON(ctx, http.MethodGet, "/Items", params, nil, &result)
 	return result.Items, err
+}
+
+func normalizeLibraryIDs(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func (c *Client) Item(ctx context.Context, id string) (Item, error) {

@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Emby Migrator</title>
-    <link rel="stylesheet" href="./assets/styles.css" />
-    <script src="./assets/app.js" defer></script>
+    <link rel="stylesheet" href="./assets/styles.css?v=0.1.0-beta.3" />
+    <script src="./assets/app.js?v=0.1.0-beta.3" defer></script>
   </head>
   <body>
     <section class="auth-gate is-hidden" id="authGate" aria-labelledby="authTitle">
       <form class="auth-card" id="authForm">
-        <p class="eyebrow">Protected Access</p>
+        <p class="eyebrow">受保护访问</p>
         <h2 id="authTitle">登录 Emby Migrator</h2>
         <label class="field">
           <span>访问密码</span>
@@ -27,14 +27,13 @@
         <div class="notice" id="authNotice" role="status" aria-live="polite"></div>
       </form>
     </section>
-
     <div class="app-shell" id="appShell">
       <header class="app-header">
         <div>
-          <p class="eyebrow">Docker Web Tool</p>
+          <p class="eyebrow">Docker 网页工具</p>
           <div class="brand-row">
             <h1>Emby Migrator</h1>
-            <span class="version-badge" id="appVersion">v0.1.0-beta.2</span>
+            <span class="version-badge" id="appVersion">v0.1.0-beta.3</span>
           </div>
         </div>
         <div class="header-actions">
@@ -43,12 +42,11 @@
             <span id="connectionText">未连接</span>
           </div>
           <button type="button" class="button small ghost" id="themeToggleBtn" aria-pressed="false">
-            暗黑
+            深色
           </button>
           <button type="button" class="button small ghost is-hidden" id="logoutBtn">退出</button>
         </div>
       </header>
-
       <main class="layout">
         <section class="notice warning is-hidden span-all" id="authWarning" role="status"></section>
 
@@ -56,7 +54,7 @@
           <div class="panel-heading">
             <div>
               <h2 id="connectionTitle">连接设置</h2>
-              <p>填写 Emby Server 地址和 API Key，用于读取媒体库、导出和导入验证。</p>
+              <p>先填写 Emby 地址和 API Key，保存后会加入服务器地址簿；后续同一地址会自动使用已保存 Key。</p>
             </div>
           </div>
 
@@ -83,16 +81,16 @@
                 autocomplete="off"
                 spellcheck="false"
                 placeholder="输入 Emby API Key"
-                required
               />
+              <small class="field-hint" id="apiKeyHint">未保存 API Key。</small>
             </label>
 
             <label class="checkline span-2 connection-remember">
               <input type="checkbox" id="rememberConnection" checked />
-              <span>记住 Emby 地址和 API Key（保存在当前浏览器）</span>
+              <span>在当前浏览器记住地址</span>
             </label>
 
-            <div class="actions span-2">
+            <div class="actions span-2 primary-actions">
               <button type="submit" class="button primary" id="testConnectionBtn">
                 测试连接
               </button>
@@ -100,11 +98,93 @@
                 读取媒体库
               </button>
             </div>
+
+            <div class="profile-section span-2" aria-labelledby="profilesTitle">
+              <div class="profile-grid">
+                <div class="profile-save-cell">
+                  <span id="profilesTitle">服务器地址簿</span>
+                  <button type="button" class="button" id="saveAppSettingsBtn">
+                    保存服务器
+                  </button>
+                </div>
+                <label class="field">
+                  <span>导出服务器（旧库）</span>
+                  <select id="sourceProfileSelect"></select>
+                </label>
+                <label class="field">
+                  <span>导入服务器（新库）</span>
+                  <select id="targetProfileSelect"></select>
+                </label>
+              </div>
+            </div>
           </form>
 
           <div class="notice" id="connectionNotice" role="status" aria-live="polite">
             等待连接测试。
           </div>
+        </section>
+
+        <section class="panel telegram-panel" aria-labelledby="telegramTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="telegramTitle">Telegram 通知</h2>
+              <p>配置任务通知和测试消息；代理只会用于访问 Telegram。</p>
+            </div>
+          </div>
+
+          <form id="telegramForm" class="form-grid">
+            <label class="field">
+              <span>机器人 Bot Token</span>
+              <input
+                id="telegramBotToken"
+                name="telegramBotToken"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="在 @BotFather 创建机器人后粘贴 Token"
+              />
+              <small class="field-hint" id="telegramTokenHint">未保存 Token。</small>
+            </label>
+
+            <label class="field">
+              <span>TG 对话 ID</span>
+              <input
+                id="telegramChatId"
+                name="telegramChatId"
+                type="text"
+                inputmode="numeric"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="例如：123456789"
+              />
+              <small class="field-hint">用户、群组或频道的 chat_id。</small>
+            </label>
+
+            <label class="field span-2">
+              <span>代理地址（可选）</span>
+              <input
+                id="telegramProxyUrl"
+                name="telegramProxyUrl"
+                type="url"
+                inputmode="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="例如：http://127.0.0.1:7890"
+              />
+              <small class="field-hint">只在发送 Telegram 请求时使用，不影响 Emby 连接。</small>
+            </label>
+
+            <div class="actions span-2 telegram-actions">
+              <button type="button" class="button" id="testTelegramBtn">
+                发送测试消息
+              </button>
+              <button type="submit" class="button primary" id="saveTelegramBtn">
+                保存配置
+              </button>
+            </div>
+          </form>
+
+          <div class="notice is-hidden" id="telegramNotice" role="status" aria-live="polite"></div>
         </section>
 
         <section class="panel libraries-panel" aria-labelledby="librariesTitle">
@@ -131,7 +211,7 @@
           </div>
         </section>
 
-        <section class="panel export-panel" aria-labelledby="exportTitle">
+        <section class="panel export-panel task-panel" aria-labelledby="exportTitle">
           <div class="panel-heading">
             <div>
               <h2 id="exportTitle">导出任务</h2>
@@ -139,62 +219,67 @@
             </div>
           </div>
 
-          <fieldset class="option-grid">
-            <legend>导出选项</legend>
-            <label class="option">
-              <input type="checkbox" id="exportMetadata" checked disabled />
-              <span>
-                <strong>元数据</strong>
-                <small class="option-code">metadata</small>
-                <small>始终导出完整元数据、info.json、raw.json 和 manifest。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="exportSkipImages" />
-              <span>
-                <strong>跳过图片</strong>
-                <small class="option-code">skipImages</small>
-                <small>只导出元数据，跳过图片下载。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="exportIncremental" checked />
-              <span>
-                <strong>增量导出</strong>
-                <small class="option-code">incremental</small>
-                <small>优先增量处理，减少重复导出。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="exportOverwrite" />
-              <span>
-                <strong>覆盖文件</strong>
-                <small class="option-code">overwrite</small>
-                <small>允许覆盖已有导出文件。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="exportIncludePeopleImages" checked />
-              <span>
-                <strong>人物头像</strong>
-                <small class="option-code">includePeopleImages</small>
-                <small>导出演员、导演等人物头像。</small>
-              </span>
-            </label>
-          </fieldset>
+          <div class="task-layout">
+            <div class="task-main">
+              <fieldset class="option-grid">
+                <legend>导出选项</legend>
+                <label class="option">
+                  <input type="checkbox" id="exportMetadata" checked disabled />
+                  <span>
+                    <strong>元数据</strong>
+                    <small class="option-code">metadata</small>
+                    <small>始终导出完整元数据、info.json、raw.json 和 manifest。</small>
+                  </span>
+                </label>
+                <label class="option">
+                  <input type="checkbox" id="exportSkipImages" />
+                  <span>
+                    <strong>跳过图片</strong>
+                    <small class="option-code">skipImages</small>
+                    <small>只导出元数据，跳过图片下载。</small>
+                  </span>
+                </label>
+                <label class="option">
+                  <input type="checkbox" id="exportIncremental" checked />
+                  <span>
+                    <strong>增量导出</strong>
+                    <small class="option-code">incremental</small>
+                    <small>优先增量处理，减少重复导出。</small>
+                  </span>
+                </label>
+                <input type="checkbox" id="exportOverwrite" class="is-hidden" aria-hidden="true" tabindex="-1" />
+                <label class="option">
+                  <input type="checkbox" id="exportIncludePeopleImages" checked />
+                  <span>
+                    <strong>人物头像</strong>
+                    <small class="option-code">includePeopleImages</small>
+                    <small>导出演员、导演等人物头像。</small>
+                  </span>
+                </label>
+              </fieldset>
+            </div>
 
-          <fieldset class="image-type-panel">
-            <legend>导出图片类型</legend>
-            <div class="image-type-grid" id="exportImageTypes"></div>
-          </fieldset>
+            <div class="task-side task-settings">
+              <details class="image-type-disclosure" open>
+                <summary>
+                  <span>导出图片类型</span>
+                  <small>默认全选，可直接调整</small>
+                </summary>
+                <fieldset class="image-type-panel">
+                  <legend>导出图片类型</legend>
+                  <div class="image-type-grid" id="exportImageTypes"></div>
+                </fieldset>
+              </details>
 
-          <fieldset class="performance-panel">
-            <legend>执行性能</legend>
-            <label class="field compact-field">
-              <span>并发数</span>
-              <input id="exportConcurrency" type="number" min="1" step="1" value="4" />
-            </label>
-          </fieldset>
+              <fieldset class="performance-panel">
+                <legend>执行性能</legend>
+                <label class="field compact-field">
+                  <span>并发数</span>
+                  <input id="exportConcurrency" type="number" min="1" step="1" value="4" />
+                </label>
+              </fieldset>
+            </div>
+          </div>
 
           <div class="actions task-actions">
             <button type="button" class="button primary" id="startExportBtn" disabled>
@@ -203,7 +288,7 @@
           </div>
         </section>
 
-        <section class="panel import-panel" aria-labelledby="importTitle">
+        <section class="panel import-panel task-panel" aria-labelledby="importTitle">
           <div class="panel-heading with-action">
             <div>
               <h2 id="importTitle">导入预检与导入</h2>
@@ -214,91 +299,76 @@
             </button>
           </div>
 
-          <div class="form-grid">
-            <label class="field span-2">
-              <span>已发现导出包</span>
-              <select id="exportsSelect">
-                <option value="">手动输入或先刷新导出包</option>
-              </select>
-            </label>
-
-            <label class="field span-2">
-              <span>导出包目录名或路径</span>
-              <input
-                id="importPath"
-                type="text"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="例如 2026-06-16_120000 或 /data/exports/2026-06-16_120000"
-              />
-            </label>
-          </div>
-
-          <div class="report-history">
-            <div class="report-history-heading">
-              <strong>历史报告</strong>
-              <div class="button-row">
-                <button type="button" class="button small" id="refreshReportsBtn" disabled>
-                  刷新报告
-                </button>
-                <button type="button" class="button small" id="downloadReportBtn" disabled>
-                  下载报告
-                </button>
+          <div class="task-layout import-task-layout">
+            <div class="task-main">
+              <div class="form-grid import-source-grid">
+                <label class="field span-2">
+                  <span>已发现导出包</span>
+                  <select id="exportsSelect">
+                    <option value="">先刷新并选择导出包</option>
+                  </select>
+                </label>
               </div>
+
+              <fieldset class="option-grid import-options">
+                <legend>导入选项</legend>
+                <label class="option">
+                  <input type="checkbox" id="importMetadata" checked disabled />
+                  <span>
+                    <strong>元数据</strong>
+                    <small class="option-code">metadata</small>
+                    <small>始终读取导出包中的元数据并参与匹配/写入。</small>
+                  </span>
+                </label>
+                <label class="option">
+                  <input type="checkbox" id="importSkipImages" />
+                  <span>
+                    <strong>跳过图片</strong>
+                    <small class="option-code">skipImages</small>
+                    <small>导入时跳过图片上传。</small>
+                  </span>
+                </label>
+                <input type="checkbox" id="importOverwrite" class="is-hidden" aria-hidden="true" tabindex="-1" />
+                <label class="option">
+                  <input type="checkbox" id="importResume" checked />
+                  <span>
+                    <strong>断点续跑</strong>
+                    <small class="option-code">resume</small>
+                    <small>优先跳过断点/进度状态中已成功的项目。</small>
+                  </span>
+                </label>
+                <label class="option">
+                  <input type="checkbox" id="importIncludePeopleImages" checked />
+                  <span>
+                    <strong>人物头像</strong>
+                    <small class="option-code">includePeopleImages</small>
+                    <small>导入演员、导演等人物头像。</small>
+                  </span>
+                </label>
+              </fieldset>
             </div>
-            <select id="reportsSelect" disabled>
-              <option value="">选择导出包后可查看历史报告</option>
-            </select>
+
+            <div class="task-side task-settings">
+              <details class="image-type-disclosure" open>
+                <summary>
+                  <span>导入图片类型</span>
+                  <small>默认全选，可直接调整</small>
+                </summary>
+                <fieldset class="image-type-panel">
+                  <legend>导入图片类型</legend>
+                  <div class="image-type-grid" id="importImageTypes"></div>
+                </fieldset>
+              </details>
+
+              <fieldset class="performance-panel">
+                <legend>执行性能</legend>
+                <label class="field compact-field">
+                  <span>并发数</span>
+                  <input id="importConcurrency" type="number" min="1" step="1" value="4" />
+                </label>
+              </fieldset>
+            </div>
           </div>
-
-          <fieldset class="option-grid import-options">
-            <legend>导入选项</legend>
-            <label class="option">
-              <input type="checkbox" id="importMetadata" checked disabled />
-              <span>
-                <strong>元数据</strong>
-                <small class="option-code">metadata</small>
-                <small>始终读取导出包中的元数据并参与匹配/写入。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="importSkipImages" />
-              <span>
-                <strong>跳过图片</strong>
-                <small class="option-code">skipImages</small>
-                <small>导入时跳过图片上传。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="importOverwrite" />
-              <span>
-                <strong>覆盖目标</strong>
-                <small class="option-code">overwrite</small>
-                <small>允许覆盖目标库已有元数据或图片。</small>
-              </span>
-            </label>
-            <label class="option">
-              <input type="checkbox" id="importIncludePeopleImages" checked />
-              <span>
-                <strong>人物头像</strong>
-                <small class="option-code">includePeopleImages</small>
-                <small>导入演员、导演等人物头像。</small>
-              </span>
-            </label>
-          </fieldset>
-
-          <fieldset class="image-type-panel">
-            <legend>导入图片类型</legend>
-            <div class="image-type-grid" id="importImageTypes"></div>
-          </fieldset>
-
-          <fieldset class="performance-panel">
-            <legend>执行性能</legend>
-            <label class="field compact-field">
-              <span>并发数</span>
-              <input id="importConcurrency" type="number" min="1" step="1" value="4" />
-            </label>
-          </fieldset>
 
           <div class="actions task-actions">
             <button type="button" class="button" id="startPrecheckBtn" disabled>
@@ -320,8 +390,17 @@
               <p>导出和导入任务共用状态展示与日志流。</p>
             </div>
             <div class="button-row">
+              <button type="button" class="button small" id="refreshJobsBtn" disabled>
+                刷新队列
+              </button>
               <button type="button" class="button small" id="refreshJobBtn" disabled>
                 刷新状态
+              </button>
+              <button type="button" class="button small" id="pauseJobBtn" disabled>
+                暂停任务
+              </button>
+              <button type="button" class="button small" id="resumeJobBtn" disabled>
+                继续任务
               </button>
               <button type="button" class="button small danger" id="stopJobBtn" disabled>
                 中止任务
@@ -347,6 +426,7 @@
               <strong id="jobProgress">-</strong>
             </div>
           </div>
+          <div class="job-list" id="jobList" aria-live="polite"></div>
         </section>
 
         <section class="panel logs-panel" aria-labelledby="logsTitle">
@@ -362,6 +442,56 @@
             </div>
           </div>
           <pre class="log-window" id="logWindow" aria-live="polite"></pre>
+        </section>
+
+        <section class="panel security-panel" aria-labelledby="securityTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="securityTitle">安全设置</h2>
+              <p>这里仅维护页面访问密码，用来保护当前迁移工具。</p>
+            </div>
+          </div>
+
+          <div class="security-shell">
+            <div class="security-note">
+              <strong>页面访问密码</strong>
+              <p>用于打开当前迁移工具，不影响 Emby 里的媒体库内容或服务器配置。</p>
+              <small>修改后，下次进入页面就使用新密码。</small>
+            </div>
+
+            <div class="actions security-primary-actions">
+              <button type="button" class="button" id="showPasswordFormBtn">修改访问密码</button>
+            </div>
+          </div>
+
+          <form id="changePasswordForm" class="form-grid security-password is-hidden">
+            <label class="field">
+              <span>当前密码</span>
+              <input
+                id="oldPassword"
+                name="oldPassword"
+                type="password"
+                autocomplete="current-password"
+                required
+              />
+            </label>
+            <label class="field">
+              <span>新密码</span>
+              <input
+                id="newPassword"
+                name="newPassword"
+                type="password"
+                autocomplete="new-password"
+                required
+                minlength="1"
+              />
+            </label>
+            <div class="actions span-2">
+              <button type="submit" class="button primary" id="changePasswordBtn">保存新密码</button>
+              <button type="button" class="button" id="cancelChangePasswordBtn">取消</button>
+            </div>
+            <div class="notice is-hidden span-2" id="changePasswordNotice" role="status" aria-live="polite"></div>
+          </form>
         </section>
       </main>
     </div>

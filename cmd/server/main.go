@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"emby-migrator/internal/config"
 	"emby-migrator/internal/exporter"
@@ -35,16 +37,28 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		log.Fatalf("listen on %s: %v", cfg.ListenAddr, err)
+	}
+
+	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("Emby Migrator listening on http://%s", cfg.ListenAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server failed: %v", err)
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			serverErrors <- err
 		}
 	}()
+	fmt.Fprintf(os.Stdout, "Emby Migrator listening on %s\n", localHTTPURL(listener.Addr().String()))
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	defer signal.Stop(stop)
+
+	select {
+	case <-stop:
+	case err := <-serverErrors:
+		log.Fatalf("server failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -52,4 +66,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "shutdown failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func localHTTPURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if host == "" || host == "::" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }

@@ -276,6 +276,140 @@ func TestItemUnmarshalToleratesNumericNestedIDs(t *testing.T) {
 	}
 }
 
+func TestSearchItemsInLibrariesScopesRequestsByParentID(t *testing.T) {
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items" {
+			http.Error(w, "wrong path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		parentID := r.URL.Query().Get("ParentId")
+		parentIDs = append(parentIDs, parentID)
+		if got := r.URL.Query().Get("SearchTerm"); got != "Matrix" {
+			http.Error(w, "wrong SearchTerm "+got, http.StatusBadRequest)
+			return
+		}
+		if got := r.URL.Query().Get("IncludeItemTypes"); got != "Movie" {
+			http.Error(w, "wrong IncludeItemTypes "+got, http.StatusBadRequest)
+			return
+		}
+		writeItemsPage(t, w, 1, []map[string]interface{}{
+			{"Id": "item-" + parentID, "Name": "Matrix", "Type": "Movie"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	items, err := client.SearchItemsInLibraries(context.Background(), "Matrix", "Movie", 20, []string{"lib-tv", "lib-movies"})
+	if err != nil {
+		t.Fatalf("SearchItemsInLibraries returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("SearchItemsInLibraries returned %d items, want 2", len(items))
+	}
+	if !reflect.DeepEqual(parentIDs, []string{"lib-tv", "lib-movies"}) {
+		t.Fatalf("ParentId requests = %#v, want lib-tv/lib-movies", parentIDs)
+	}
+}
+
+func TestSearchItemsWithoutLibrariesKeepsUnscopedRequest(t *testing.T) {
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items" {
+			http.Error(w, "wrong path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		parentIDs = append(parentIDs, r.URL.Query().Get("ParentId"))
+		writeItemsPage(t, w, 1, []map[string]interface{}{
+			{"Id": "item-1", "Name": "Matrix", "Type": "Movie"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	if _, err := client.SearchItems(context.Background(), "Matrix", "Movie", 20); err != nil {
+		t.Fatalf("SearchItems returned error: %v", err)
+	}
+	if !reflect.DeepEqual(parentIDs, []string{""}) {
+		t.Fatalf("unscoped SearchItems should omit ParentId, got %#v", parentIDs)
+	}
+}
+
+func TestItemsByProviderIDInLibrariesScopesRequestsByParentID(t *testing.T) {
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items" {
+			http.Error(w, "wrong path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		parentID := r.URL.Query().Get("ParentId")
+		parentIDs = append(parentIDs, parentID)
+		if got := r.URL.Query().Get("AnyProviderIdEquals"); got != "Tmdb.123" {
+			http.Error(w, "wrong provider id "+got, http.StatusBadRequest)
+			return
+		}
+		writeItemsPage(t, w, 1, []map[string]interface{}{
+			{"Id": "item-" + parentID, "Name": "Matrix", "Type": "Movie"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	items, err := client.ItemsByProviderIDInLibraries(context.Background(), "Tmdb.123", []string{"lib-tv", "lib-movies"})
+	if err != nil {
+		t.Fatalf("ItemsByProviderIDInLibraries returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("ItemsByProviderIDInLibraries returned %d items, want 2", len(items))
+	}
+	if !reflect.DeepEqual(parentIDs, []string{"lib-tv", "lib-movies"}) {
+		t.Fatalf("ParentId requests = %#v, want lib-tv/lib-movies", parentIDs)
+	}
+}
+
+func TestItemsByProviderIDWithoutLibrariesKeepsUnscopedRequest(t *testing.T) {
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items" {
+			http.Error(w, "wrong path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		parentIDs = append(parentIDs, r.URL.Query().Get("ParentId"))
+		writeItemsPage(t, w, 1, []map[string]interface{}{
+			{"Id": "item-1", "Name": "Matrix", "Type": "Movie"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	if _, err := client.ItemsByProviderID(context.Background(), "Tmdb.123"); err != nil {
+		t.Fatalf("ItemsByProviderID returned error: %v", err)
+	}
+	if !reflect.DeepEqual(parentIDs, []string{""}) {
+		t.Fatalf("unscoped ItemsByProviderID should omit ParentId, got %#v", parentIDs)
+	}
+}
+
 func TestFallbackImagesUsesConfiguredImageTypesAndBackdropIndexes(t *testing.T) {
 	oldTypes := DefaultImageTypes
 	DefaultImageTypes = []string{"Primary", "Logo", "Backdrop"}

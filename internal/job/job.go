@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -12,6 +13,7 @@ type Status string
 const (
 	StatusQueued  Status = "queued"
 	StatusRunning Status = "running"
+	StatusPaused  Status = "paused"
 	StatusDone    Status = "done"
 	StatusFailed  Status = "failed"
 	StatusStopped Status = "stopped"
@@ -33,6 +35,8 @@ type Job struct {
 	cancel context.CancelFunc
 	logs   []LogEntry
 	subs   map[chan LogEntry]struct{}
+	paused bool
+	pause  chan struct{}
 	mu     sync.RWMutex
 }
 
@@ -45,17 +49,37 @@ type LogEntry struct {
 type Manager struct {
 	mu   sync.RWMutex
 	jobs map[string]*Job
+	work chan queuedWork
+}
+
+type queuedWork struct {
+	job *Job
+	run func(*Job)
 }
 
 func NewManager() *Manager {
-	return &Manager{jobs: map[string]*Job{}}
+	m := &Manager{
+		jobs: map[string]*Job{},
+		work: make(chan queuedWork, 128),
+	}
+	go m.runQueue()
+	return m
 }
 
 func (m *Manager) Create(jobType string) *Job {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
+	m.mu.Lock()
+	id := fmt.Sprintf("%d", now.UnixNano())
+	for {
+		if _, exists := m.jobs[id]; !exists {
+			break
+		}
+		now = now.Add(time.Nanosecond)
+		id = fmt.Sprintf("%d", now.UnixNano())
+	}
 	j := &Job{
-		ID:        fmt.Sprintf("%d", now.UnixNano()),
+		ID:        id,
 		Type:      jobType,
 		Status:    StatusQueued,
 		CreatedAt: now,
@@ -64,9 +88,14 @@ func (m *Manager) Create(jobType string) *Job {
 		cancel:    cancel,
 		subs:      map[chan LogEntry]struct{}{},
 	}
-	m.mu.Lock()
 	m.jobs[j.ID] = j
 	m.mu.Unlock()
+	return j
+}
+
+func (m *Manager) Enqueue(jobType string, run func(*Job)) *Job {
+	j := m.Create(jobType)
+	m.work <- queuedWork{job: j, run: run}
 	return j
 }
 
@@ -77,17 +106,48 @@ func (m *Manager) Get(id string) (*Job, bool) {
 	return j, ok
 }
 
+func (m *Manager) List() []Job {
+	m.mu.RLock()
+	jobs := make([]*Job, 0, len(m.jobs))
+	for _, j := range m.jobs {
+		jobs = append(jobs, j)
+	}
+	m.mu.RUnlock()
+
+	out := make([]Job, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, j.Snapshot())
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out
+}
+
+func (m *Manager) runQueue() {
+	for work := range m.work {
+		if work.run == nil || !work.job.Start() {
+			continue
+		}
+		work.run(work.job)
+	}
+}
+
 func (j *Job) Context() context.Context {
 	return j.ctx
 }
 
-func (j *Job) Start() {
+func (j *Job) Start() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if isTerminalStatus(j.Status) {
+		return false
+	}
 	now := time.Now()
 	j.Status = StatusRunning
 	j.StartedAt = now
 	j.UpdatedAt = now
+	return true
 }
 
 func (j *Job) Complete(result any) {
@@ -101,6 +161,7 @@ func (j *Job) Complete(result any) {
 	j.Result = result
 	j.EndedAt = now
 	j.UpdatedAt = now
+	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "info", Message: "任务完成"})
 	j.closeSubsLocked()
 }
@@ -116,6 +177,7 @@ func (j *Job) Fail(err error) {
 	j.Error = err.Error()
 	j.EndedAt = now
 	j.UpdatedAt = now
+	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "error", Message: err.Error()})
 	j.closeSubsLocked()
 }
@@ -132,6 +194,7 @@ func (j *Job) FailWithResult(err error, result any) {
 	j.Error = err.Error()
 	j.EndedAt = now
 	j.UpdatedAt = now
+	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "error", Message: err.Error()})
 	j.closeSubsLocked()
 }
@@ -147,9 +210,58 @@ func (j *Job) Stop() bool {
 	j.Status = StatusStopped
 	j.EndedAt = now
 	j.UpdatedAt = now
+	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "warn", Message: "任务已停止"})
 	j.closeSubsLocked()
 	return true
+}
+
+func (j *Job) Pause() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.Status != StatusRunning {
+		return false
+	}
+	now := time.Now()
+	j.Status = StatusPaused
+	j.paused = true
+	if j.pause == nil {
+		j.pause = make(chan struct{})
+	}
+	j.UpdatedAt = now
+	j.publishLocked(LogEntry{Time: now, Level: "warn", Message: "任务已暂停，当前请求完成后停止派发新项目"})
+	return true
+}
+
+func (j *Job) Resume() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.Status != StatusPaused {
+		return false
+	}
+	now := time.Now()
+	j.Status = StatusRunning
+	j.UpdatedAt = now
+	j.resumeLocked()
+	j.publishLocked(LogEntry{Time: now, Level: "info", Message: "任务已继续"})
+	return true
+}
+
+func (j *Job) WaitIfPaused(ctx context.Context) error {
+	for {
+		j.mu.RLock()
+		paused := j.paused && j.Status == StatusPaused
+		pause := j.pause
+		j.mu.RUnlock()
+		if !paused {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pause:
+		}
+	}
 }
 
 func (j *Job) Log(level, message string, args ...any) {
@@ -212,8 +324,20 @@ func (j *Job) Subscribe() (<-chan LogEntry, func()) {
 	}
 }
 
-func isTerminalStatus(status Status) bool {
+func IsTerminalStatus(status Status) bool {
 	return status == StatusDone || status == StatusFailed || status == StatusStopped
+}
+
+func isTerminalStatus(status Status) bool {
+	return IsTerminalStatus(status)
+}
+
+func (j *Job) resumeLocked() {
+	if j.pause != nil {
+		close(j.pause)
+		j.pause = nil
+	}
+	j.paused = false
 }
 
 func (j *Job) publishLocked(entry LogEntry) {

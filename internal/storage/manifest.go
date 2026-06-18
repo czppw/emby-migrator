@@ -62,6 +62,7 @@ type ManifestPerson struct {
 type ManifestImage struct {
 	Type   string
 	File   string
+	Size   int64
 	SHA256 string
 }
 
@@ -80,8 +81,18 @@ type Manifest struct {
 	Errors        []ErrorEntry   `json:"errors,omitempty"`
 	Summary       Summary        `json:"summary"`
 	Source        string         `json:"source,omitempty"`
+	Incremental   *Incremental   `json:"incremental,omitempty"`
 	SchemaVersion int            `json:"schemaVersion"`
 	Compatibility string         `json:"compatibility"`
+}
+
+type Incremental struct {
+	Enabled            bool      `json:"enabled"`
+	BaselineExportName string    `json:"baselineExportName,omitempty"`
+	BaselineExportPath string    `json:"baselineExportPath,omitempty"`
+	SkippedItems       int       `json:"skippedItems,omitempty"`
+	ChangedItems       int       `json:"changedItems,omitempty"`
+	CreatedAt          time.Time `json:"createdAt,omitempty"`
 }
 
 type LibraryEntry struct {
@@ -106,6 +117,9 @@ type ItemEntry struct {
 	IndexNumber       int               `json:"indexNumber,omitempty"`
 	ParentIndexNumber int               `json:"parentIndexNumber,omitempty"`
 	ProviderIDs       map[string]string `json:"providerIds,omitempty"`
+	Fingerprint       string            `json:"fingerprint,omitempty"`
+	Skipped           bool              `json:"skipped,omitempty"`
+	SkipReason        string            `json:"skipReason,omitempty"`
 	InfoPath          string            `json:"infoPath"`
 	RawPath           string            `json:"rawPath"`
 	Images            []FileEntry       `json:"images,omitempty"`
@@ -145,6 +159,7 @@ type Summary struct {
 	ItemImages         int `json:"itemImages"`
 	PeopleImages       int `json:"peopleImages"`
 	Errors             int `json:"errors"`
+	SkippedItems       int `json:"skippedItems,omitempty"`
 	Matched            int `json:"matched,omitempty"`
 	Unmatched          int `json:"unmatched,omitempty"`
 	Ambiguous          int `json:"ambiguous,omitempty"`
@@ -353,14 +368,14 @@ func BuildManifest(input ManifestInput) (Manifest, error) {
 			ProviderIDs: item.ProviderIDs,
 		}
 		for _, image := range item.Images {
-			entry.Images = append(entry.Images, FileEntry{Type: image.Type, Path: image.File, SHA256: image.SHA256})
+			entry.Images = append(entry.Images, FileEntry{Type: image.Type, Path: image.File, Size: image.Size, SHA256: image.SHA256})
 		}
 		manifest.Items = append(manifest.Items, entry)
 	}
 	for _, person := range input.People {
 		entry := PersonEntry{Name: person.Name, StableKey: "person-" + Slug(person.Name)}
 		if person.Image != nil {
-			entry.Image = &FileEntry{Type: person.Image.Type, Path: person.Image.File, SHA256: person.Image.SHA256}
+			entry.Image = &FileEntry{Type: person.Image.Type, Path: person.Image.File, Size: person.Image.Size, SHA256: person.Image.SHA256}
 		}
 		manifest.People = append(manifest.People, entry)
 	}

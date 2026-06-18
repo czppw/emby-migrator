@@ -127,6 +127,226 @@ func TestListImportReportsReturnsSummaryAndIgnoresOtherFiles(t *testing.T) {
 	}
 }
 
+func TestResumeSuccessfulItemsReadsLatestSuccessfulReport(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-100000.json"), ImportReport{
+		DryRun: true,
+		Matches: []ImportMatch{
+			{StableKey: "dry", Status: "matched"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-110000.json"), ImportReport{
+		Matches: []ImportMatch{
+			{StableKey: "done", Status: "updated"},
+			{StableKey: "bad", Status: "failed"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done, reportName := service.resumeSuccessfulItems(exportDir, ImportTarget{})
+	if reportName != "import-report-20260617-110000.json" {
+		t.Fatalf("reportName = %q", reportName)
+	}
+	if !done["done"] || done["bad"] || done["dry"] {
+		t.Fatalf("resume map = %#v", done)
+	}
+}
+
+func TestResumeSuccessfulItemsMergesCheckpointAndReportsForSameTarget(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
+	checkpoint := newImportCheckpointStore(exportDir, target)
+	if err := checkpoint.Record(ImportMatch{StableKey: "checkpoint", SourceName: "Checkpoint", TargetID: "item-1", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-100000.json"), ImportReport{
+		Target: target,
+		Matches: []ImportMatch{
+			{StableKey: "older", Status: "updated"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-110000.json"), ImportReport{
+		Target: ImportTarget{ServerID: "target-b"},
+		Matches: []ImportMatch{
+			{StableKey: "other-target", Status: "updated"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done, reportName := service.resumeSuccessfulItems(exportDir, target)
+	if !strings.Contains(reportName, "import-checkpoint.json") || !strings.Contains(reportName, "import-report-20260617-100000.json") {
+		t.Fatalf("reportName = %q", reportName)
+	}
+	if !done["checkpoint"] || !done["older"] || done["other-target"] {
+		t.Fatalf("resume map = %#v", done)
+	}
+}
+
+func TestResumeSuccessfulItemsDoesNotResumeImageFailedItems(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := ImportTarget{ServerID: "target-a"}
+	checkpoint := newImportCheckpointStore(exportDir, target)
+	if err := checkpoint.Record(ImportMatch{
+		StableKey:     "image-failed-checkpoint",
+		SourceName:    "Image Failed Checkpoint",
+		TargetID:      "item-1",
+		Status:        "updated",
+		ImageFailures: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpoint.Record(ImportMatch{
+		StableKey:  "clean-checkpoint",
+		SourceName: "Clean Checkpoint",
+		TargetID:   "item-2",
+		Status:     "updated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-100000.json"), ImportReport{
+		Target: target,
+		Matches: []ImportMatch{
+			{StableKey: "image-failed-report", Status: "updated", ImageFailures: 1},
+			{StableKey: "clean-report", Status: "updated"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done, _ := service.resumeSuccessfulItems(exportDir, target)
+	if done["image-failed-checkpoint"] || done["image-failed-report"] {
+		t.Fatalf("image-failed items should not resume as complete: %#v", done)
+	}
+	if !done["clean-checkpoint"] || !done["clean-report"] {
+		t.Fatalf("clean successful items should resume: %#v", done)
+	}
+	if shouldCheckpointMatch(ImportMatch{StableKey: "item", Status: "updated", ImageFailures: 1}, false) {
+		t.Fatalf("image-failed updated match should not be checkpointed")
+	}
+}
+
+func TestImportCheckpointRecordClearsItemsWhenTargetSwitches(t *testing.T) {
+	exportDir := t.TempDir()
+	firstTarget := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
+	secondTarget := ImportTarget{ServerID: "target-b", ServerName: "Target B", Version: "4.9.5"}
+	first := newImportCheckpointStore(exportDir, firstTarget)
+	if err := first.Record(ImportMatch{StableKey: "old-item", SourceName: "Old", TargetID: "old-target", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.RecordPersonAvatar(personImageResult{StableKey: "old-person", Name: "Old Person", TargetID: "old-person-target"}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newImportCheckpointStore(exportDir, secondTarget)
+	if err := second.Record(ImportMatch{StableKey: "new-item", SourceName: "New", TargetID: "new-target", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpoint, ok := readImportCheckpoint(filepath.Join(exportDir, "import-checkpoint.json"), secondTarget)
+	if !ok {
+		t.Fatalf("checkpoint should read for second target")
+	}
+	if checkpoint.Items["old-item"].StableKey != "" || checkpoint.PersonAvatars["old-person"].StableKey != "" {
+		t.Fatalf("target switch should clear old checkpoint entries: %#v", checkpoint)
+	}
+	if checkpoint.Items["new-item"].StableKey == "" {
+		t.Fatalf("new target item missing after target switch: %#v", checkpoint)
+	}
+}
+
+func TestSameImportTargetAllowsOnlyUnknownLegacyCompatibility(t *testing.T) {
+	unknown := ImportTarget{}
+	if !sameImportTarget(unknown, unknown) {
+		t.Fatalf("empty legacy targets should be compatible")
+	}
+	if sameImportTarget(ImportTarget{ServerID: "target-a"}, unknown) {
+		t.Fatalf("identified target should not match unknown target")
+	}
+	if sameImportTarget(ImportTarget{ServerID: "target-a"}, ImportTarget{ServerID: "target-b"}) {
+		t.Fatalf("different target ids should not match")
+	}
+	if sameImportTarget(ImportTarget{ServerName: "Target A"}, ImportTarget{ServerName: "Target B"}) {
+		t.Fatalf("partial target names should not match")
+	}
+	if !sameImportTarget(
+		ImportTarget{ServerName: "Target A", Version: "4.9.5"},
+		ImportTarget{ServerName: "Target A", Version: "4.9.5"},
+	) {
+		t.Fatalf("matching complete legacy name/version targets should match")
+	}
+}
+
+func TestNextImportReportPathAvoidsSameSecondCollision(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 6, 18, 10, 20, 30, 123456789, time.Local)
+	first, err := nextImportReportPath(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(first, map[string]any{"ok": true}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := nextImportReportPath(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("report path collision: %s", first)
+	}
+	if !strings.Contains(filepath.Base(first), "102030.123456789") || !strings.Contains(filepath.Base(second), "-002") {
+		t.Fatalf("unexpected report names: first=%s second=%s", filepath.Base(first), filepath.Base(second))
+	}
+}
+
+func TestImportableManifestItemsSkipsIncrementalUnchangedItems(t *testing.T) {
+	items := []storage.ItemEntry{
+		{StableKey: "changed", Name: "Changed"},
+		{StableKey: "unchanged", Name: "Unchanged", Skipped: true},
+	}
+	got := importableManifestItems(items)
+	if len(got) != 1 || got[0].StableKey != "changed" {
+		t.Fatalf("importableManifestItems = %#v", got)
+	}
+}
+
+func TestFailureReportGroupsLimitedExamples(t *testing.T) {
+	var failures FailureReport
+	for i := 0; i < 25; i++ {
+		addFailureExample(&failures, ImportMatch{
+			StableKey:  "missing",
+			SourceName: "Missing",
+			Status:     "unmatched",
+			Reason:     "not found",
+		})
+	}
+	addFailureExample(&failures, ImportMatch{StableKey: "amb", Status: "ambiguous", Candidates: []string{"A", "B"}})
+	addFailureExample(&failures, ImportMatch{StableKey: "err", Status: "failed", Error: "boom"})
+	if len(failures.Unmatched) != 20 || len(failures.Ambiguous) != 1 || len(failures.Failed) != 1 {
+		t.Fatalf("failure groups = %#v", failures)
+	}
+}
+
 func TestValidateExportPackageDetectsMissingAndEscapingFiles(t *testing.T) {
 	exportPath := t.TempDir()
 	manifest := storage.Manifest{
@@ -205,6 +425,70 @@ func TestValidateExportPackagePassesCompletePackage(t *testing.T) {
 	}
 	if validation.CheckedFiles != 5 {
 		t.Fatalf("checked files = %d, want 5", validation.CheckedFiles)
+	}
+}
+
+func TestValidateExportPackageDetectsTamperedChecksumAndSize(t *testing.T) {
+	exportPath := t.TempDir()
+	imageRel := "libraries/movies/items/movie/poster.jpg"
+	file, err := storage.WriteBytes(filepath.Join(exportPath, filepath.FromSlash(imageRel)), []byte("original-image"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Path = imageRel
+	file.Type = "Primary"
+	manifest := storage.Manifest{
+		Items: []storage.ItemEntry{
+			{
+				Name:     "Movie",
+				InfoPath: "libraries/movies/items/movie/info.json",
+				Images:   []storage.FileEntry{file},
+			},
+		},
+	}
+	for _, rel := range []string{"manifest.json", "libraries/movies/items/movie/info.json"} {
+		if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rel)), map[string]any{"ok": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(exportPath, filepath.FromSlash(imageRel)), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	validation := ValidateExportPackage(exportPath, manifest)
+	if validation.OK() {
+		t.Fatalf("validation should fail for tampered image: %#v", validation)
+	}
+	if validation.SizeMismatches != 1 || validation.ChecksumMismatches != 1 {
+		t.Fatalf("validation mismatch counts = %#v, want one size and one checksum mismatch", validation)
+	}
+	if !strings.Contains(validation.Error(), "SHA256 不一致") {
+		t.Fatalf("validation error should mention checksum: %q", validation.Error())
+	}
+}
+
+func TestValidateExportPackageAllowsLegacyEntriesWithoutChecksum(t *testing.T) {
+	exportPath := t.TempDir()
+	manifest := storage.Manifest{
+		Items: []storage.ItemEntry{
+			{
+				Name:     "Movie",
+				InfoPath: "libraries/movies/items/movie/info.json",
+				Images:   []storage.FileEntry{{Type: "Primary", Path: "libraries/movies/items/movie/poster.jpg"}},
+			},
+		},
+	}
+	for _, rel := range []string{
+		"manifest.json",
+		"libraries/movies/items/movie/info.json",
+		"libraries/movies/items/movie/poster.jpg",
+	} {
+		if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rel)), map[string]any{"ok": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	validation := ValidateExportPackage(exportPath, manifest)
+	if !validation.OK() {
+		t.Fatalf("legacy package without checksum should pass existence validation: %#v", validation)
 	}
 }
 
@@ -352,6 +636,83 @@ func TestExportEnrichesItemsWhenListResponseOmitsImagesAndPeople(t *testing.T) {
 	}
 	if result.Manifest.Summary.PeopleImages != 1 {
 		t.Fatalf("people images = %d, want 1", result.Manifest.Summary.PeopleImages)
+	}
+}
+
+func TestIncrementalExportSkipsUnchangedItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.9.5.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("ParentId") == "lib-movies":
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{
+						"Id":          "item-1",
+						"Name":        "Movie",
+						"Type":        "Movie",
+						"Path":        `D:\Movies\Movie.mkv`,
+						"ProviderIds": map[string]string{"Tmdb": "123"},
+						"ImageTags":   map[string]string{"Primary": "poster-tag"},
+					},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1":
+			writeExporterJSON(t, w, map[string]any{
+				"Id":          "item-1",
+				"Name":        "Movie",
+				"Type":        "Movie",
+				"Path":        `D:\Movies\Movie.mkv`,
+				"ProviderIds": map[string]string{"Tmdb": "123"},
+				"ImageTags":   map[string]string{"Primary": "poster-tag"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images":
+			writeExporterJSON(t, w, []map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images/Primary":
+			writeExporterImage(w)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(t.TempDir())
+	request := ExportRequest{
+		Connection: emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries:  []emby.Library{{ID: "lib-movies", Name: "Movies"}},
+		ImageTypes: []string{"Primary"},
+	}
+
+	firstJob := job.NewManager().Create("export")
+	firstJob.Start()
+	first, err := service.Export(context.Background(), firstJob, request)
+	if err != nil {
+		t.Fatalf("first export returned error: %v", err)
+	}
+	if first.Manifest.Summary.SkippedItems != 0 || len(first.Manifest.Items) != 1 {
+		t.Fatalf("first manifest = %#v", first.Manifest)
+	}
+
+	secondJob := job.NewManager().Create("export")
+	secondJob.Start()
+	request.Incremental = true
+	second, err := service.Export(context.Background(), secondJob, request)
+	if err != nil {
+		t.Fatalf("second export returned error: %v", err)
+	}
+	if second.Manifest.Incremental == nil || !second.Manifest.Incremental.Enabled {
+		t.Fatalf("incremental metadata missing: %#v", second.Manifest.Incremental)
+	}
+	if second.Manifest.Incremental.BaselineExportName != filepath.Base(first.Path) {
+		t.Fatalf("baseline = %q, want %q", second.Manifest.Incremental.BaselineExportName, filepath.Base(first.Path))
+	}
+	if second.Manifest.Summary.SkippedItems != 1 || len(second.Manifest.Items) != 1 || !second.Manifest.Items[0].Skipped {
+		t.Fatalf("second manifest did not mark item skipped: %#v", second.Manifest)
+	}
+	validation := ValidateExportPackage(second.Path, second.Manifest)
+	if !validation.OK() {
+		t.Fatalf("incremental skipped package should validate: %#v", validation)
 	}
 }
 
@@ -889,6 +1250,112 @@ func TestImportItemFallsBackToMinimalMetadataPayloadOnSourceNullError(t *testing
 	}
 }
 
+func TestImportItemUsesTargetLibraryIDsForMatchSearch(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{Name: "Scoped Provider Movie", Type: "Movie"},
+	}); err != nil {
+		t.Fatalf("WriteJSON returned error: %v", err)
+	}
+
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			parentIDs = append(parentIDs, r.URL.Query().Get("ParentId"))
+			if got := r.URL.Query().Get("AnyProviderIdEquals"); got != "Tmdb.123" {
+				http.Error(w, "unexpected provider id "+got, http.StatusBadRequest)
+				return
+			}
+			if got := r.URL.Query().Get("ParentId"); got != "lib-target" {
+				http.Error(w, "unexpected ParentId "+got, http.StatusBadRequest)
+				return
+			}
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Movie", "Name": "Scoped Provider Movie", "ProviderIds": map[string]string{"Tmdb": "123"}},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name:        "Scoped Provider Movie",
+		Type:        "Movie",
+		InfoPath:    infoRel,
+		ProviderIDs: map[string]string{"Tmdb": "123"},
+	}, ImportRequest{TargetLibraryIDs: []string{"lib-target"}})
+	if match.Status != "updated" || match.TargetID != "target-id" || match.Error != "" {
+		t.Fatalf("importItem did not match/update scoped target: %#v", match)
+	}
+	if !reflect.DeepEqual(parentIDs, []string{"lib-target"}) {
+		t.Fatalf("match search ParentId = %#v, want lib-target", parentIDs)
+	}
+}
+
+func TestImportItemUsesLegacyLibraryIDsForMatchSearch(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{Name: "Legacy Scoped Provider Movie", Type: "Movie"},
+	}); err != nil {
+		t.Fatalf("WriteJSON returned error: %v", err)
+	}
+
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			parentIDs = append(parentIDs, r.URL.Query().Get("ParentId"))
+			if got := r.URL.Query().Get("ParentId"); got != "legacy-lib" {
+				http.Error(w, "unexpected ParentId "+got, http.StatusBadRequest)
+				return
+			}
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Movie", "Name": "Legacy Scoped Provider Movie", "ProviderIds": map[string]string{"Tmdb": "456"}},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name:        "Legacy Scoped Provider Movie",
+		Type:        "Movie",
+		InfoPath:    infoRel,
+		ProviderIDs: map[string]string{"Tmdb": "456"},
+	}, ImportRequest{LibraryIDs: []string{"legacy-lib"}})
+	if match.Status != "updated" || match.TargetID != "target-id" || match.Error != "" {
+		t.Fatalf("importItem did not match/update legacy scoped target: %#v", match)
+	}
+	if !reflect.DeepEqual(parentIDs, []string{"legacy-lib"}) {
+		t.Fatalf("match search ParentId = %#v, want legacy-lib", parentIDs)
+	}
+}
+
 func TestImportLookupCacheReusesProviderIDSearches(t *testing.T) {
 	providerQueries := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -929,6 +1396,101 @@ func TestImportLookupCacheReusesProviderIDSearches(t *testing.T) {
 	}
 	if providerQueries != 1 {
 		t.Fatalf("provider ID search count = %d, want 1", providerQueries)
+	}
+}
+
+func TestImportLookupCacheSeparatesProviderIDSearchesByTargetLibraries(t *testing.T) {
+	providerQueriesByParent := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("AnyProviderIdEquals") == "Tmdb.123":
+			parentID := r.URL.Query().Get("ParentId")
+			providerQueriesByParent[parentID]++
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-" + parentID, "Type": "Movie", "Name": "Cached Provider Movie", "ProviderIds": map[string]string{"Tmdb": "123"}},
+				},
+				"TotalRecordCount": 1,
+			})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	cache := newImportLookupCache()
+	entry := storage.ItemEntry{
+		Type:        "Movie",
+		Name:        "Cached Provider Movie",
+		ProviderIDs: map[string]string{"Tmdb": "123"},
+	}
+	target, _, reason, err := findMatchWithCache(context.Background(), client, cache, entry, []string{"lib-a"})
+	if err != nil {
+		t.Fatalf("findMatchWithCache lib-a returned error: %v", err)
+	}
+	if target.ID != "target-lib-a" || reason != "provider-id" {
+		t.Fatalf("lib-a target=%#v reason=%q, want provider-id target", target, reason)
+	}
+	target, _, reason, err = findMatchWithCache(context.Background(), client, cache, entry, []string{"lib-b"})
+	if err != nil {
+		t.Fatalf("findMatchWithCache lib-b returned error: %v", err)
+	}
+	if target.ID != "target-lib-b" || reason != "provider-id" {
+		t.Fatalf("lib-b target=%#v reason=%q, want provider-id target", target, reason)
+	}
+	target, _, reason, err = findMatchWithCache(context.Background(), client, cache, entry, []string{"lib-a"})
+	if err != nil {
+		t.Fatalf("findMatchWithCache cached lib-a returned error: %v", err)
+	}
+	if target.ID != "target-lib-a" || reason != "provider-id" {
+		t.Fatalf("cached lib-a target=%#v reason=%q, want provider-id target", target, reason)
+	}
+	if !reflect.DeepEqual(providerQueriesByParent, map[string]int{"lib-a": 1, "lib-b": 1}) {
+		t.Fatalf("provider queries by ParentId = %#v, want one per library", providerQueriesByParent)
+	}
+}
+
+func TestFindMatchWithoutTargetLibrariesKeepsUnscopedProviderIDSearch(t *testing.T) {
+	var parentIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("AnyProviderIdEquals") == "Tmdb.123":
+			parentIDs = append(parentIDs, r.URL.Query().Get("ParentId"))
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Movie", "Name": "Unscoped Provider Movie", "ProviderIds": map[string]string{"Tmdb": "123"}},
+				},
+				"TotalRecordCount": 1,
+			})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	target, _, reason, err := findMatchWithCache(context.Background(), client, newImportLookupCache(), storage.ItemEntry{
+		Type:        "Movie",
+		Name:        "Unscoped Provider Movie",
+		ProviderIDs: map[string]string{"Tmdb": "123"},
+	})
+	if err != nil {
+		t.Fatalf("findMatchWithCache returned error: %v", err)
+	}
+	if target.ID != "target-id" || reason != "provider-id" {
+		t.Fatalf("target=%#v reason=%q, want provider-id target", target, reason)
+	}
+	if !reflect.DeepEqual(parentIDs, []string{""}) {
+		t.Fatalf("unscoped provider search should omit ParentId, got %#v", parentIDs)
 	}
 }
 
@@ -977,6 +1539,86 @@ func TestImportPersonImageCachesPersonLookupByName(t *testing.T) {
 	}
 	if uploads != 2 {
 		t.Fatalf("uploads = %d, want 2", uploads)
+	}
+}
+
+func TestImportPeopleImagesRecordsAndResumesPersonAvatarCheckpoint(t *testing.T) {
+	exportPath := t.TempDir()
+	firstImageRel := "people/actor-one/primary.jpg"
+	secondImageRel := "people/actor-two/primary.jpg"
+	for _, rel := range []string{firstImageRel, secondImageRel} {
+		if _, err := storage.WriteBytes(filepath.Join(exportPath, filepath.FromSlash(rel)), []byte("avatar")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
+	checkpoint := newImportCheckpointStore(exportPath, target)
+	if err := checkpoint.RecordPersonAvatar(personImageResult{StableKey: "person-one", Name: "Actor One", TargetID: "person-target-one"}); err != nil {
+		t.Fatal(err)
+	}
+
+	personQueries := 0
+	uploads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Persons":
+			personQueries++
+			if got := r.URL.Query().Get("SearchTerm"); got != "Actor Two" {
+				http.Error(w, "unexpected person search "+got, http.StatusBadRequest)
+				return
+			}
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "person-target-two", "Name": "Actor Two"},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/person-target-two/Images/Primary":
+			uploads++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	manager := job.NewManager()
+	j := manager.Create("import")
+	j.Start()
+	report := ImportReport{Target: target}
+	manifest := storage.Manifest{
+		People: []storage.PersonEntry{
+			{StableKey: "person-one", Name: "Actor One", Image: &storage.FileEntry{Type: "Primary", Path: firstImageRel}},
+			{StableKey: "person-two", Name: "Actor Two", Image: &storage.FileEntry{Type: "Primary", Path: secondImageRel}},
+		},
+	}
+
+	service := NewService(exportPath)
+	err = service.importPeopleImages(context.Background(), client, newImportLookupCache(), checkpoint, exportPath, manifest, &report, j, true, false, 1)
+	if err != nil {
+		t.Fatalf("importPeopleImages returned error: %v", err)
+	}
+	if personQueries != 1 || uploads != 1 {
+		t.Fatalf("resume should skip first avatar and upload second, queries=%d uploads=%d", personQueries, uploads)
+	}
+	if report.Skips == nil || report.Skips.Resume != 1 {
+		t.Fatalf("resume skip should be counted, skips=%#v", report.Skips)
+	}
+	if report.Summary.PeopleImages != 1 || report.Summary.PeopleImagesFailed != 0 {
+		t.Fatalf("unexpected people image summary: %#v", report.Summary)
+	}
+	stored, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target)
+	if !ok {
+		t.Fatalf("checkpoint should be readable")
+	}
+	if !shouldResumePersonAvatarCheckpoint(stored.PersonAvatars["person-one"]) ||
+		!shouldResumePersonAvatarCheckpoint(stored.PersonAvatars["person-two"]) {
+		t.Fatalf("successful avatar checkpoints not recorded: %#v", stored.PersonAvatars)
 	}
 }
 

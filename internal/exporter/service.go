@@ -2,6 +2,9 @@ package exporter
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,11 +42,14 @@ type ExportRequest struct {
 type ImportRequest struct {
 	Connection          emby.Connection `json:"connection"`
 	ExportPath          string          `json:"exportPath"`
+	TargetLibraryIDs    []string        `json:"targetLibraryIds,omitempty"`
+	LibraryIDs          []string        `json:"libraryIds,omitempty"`
 	Concurrency         int             `json:"concurrency"`
 	DryRun              bool            `json:"dryRun"`
 	SkipImages          bool            `json:"skipImages"`
 	IncludePeopleImages bool            `json:"includePeopleImages"`
 	Overwrite           bool            `json:"overwrite"`
+	Resume              bool            `json:"resume"`
 	ImageTypes          []string        `json:"imageTypes"`
 	ToolVersion         string          `json:"toolVersion"`
 }
@@ -68,15 +74,18 @@ type ImportReportInfo struct {
 	DryRun        bool                 `json:"dryRun"`
 	StartedAt     time.Time            `json:"startedAt,omitempty"`
 	EndedAt       time.Time            `json:"endedAt,omitempty"`
+	Target        ImportTarget         `json:"target,omitempty"`
 	Compatibility CompatibilityProfile `json:"compatibility"`
 	Summary       storage.Summary      `json:"summary"`
 }
 
 type PackageValidation struct {
-	CheckedFiles int      `json:"checkedFiles"`
-	MissingFiles int      `json:"missingFiles"`
-	InvalidPaths int      `json:"invalidPaths"`
-	Errors       []string `json:"errors,omitempty"`
+	CheckedFiles       int      `json:"checkedFiles"`
+	MissingFiles       int      `json:"missingFiles"`
+	InvalidPaths       int      `json:"invalidPaths"`
+	SizeMismatches     int      `json:"sizeMismatches"`
+	ChecksumMismatches int      `json:"checksumMismatches"`
+	Errors             []string `json:"errors,omitempty"`
 }
 
 type CompatibilityProfile struct {
@@ -90,11 +99,107 @@ type ImportReport struct {
 	StartedAt     time.Time            `json:"startedAt"`
 	EndedAt       time.Time            `json:"endedAt"`
 	DryRun        bool                 `json:"dryRun"`
+	Target        ImportTarget         `json:"target,omitempty"`
 	Compatibility CompatibilityProfile `json:"compatibility"`
+	Diff          ImportDiff           `json:"diff,omitempty"`
+	Incremental   *ImportIncremental   `json:"incremental,omitempty"`
+	Skips         *ImportSkipReport    `json:"skips,omitempty"`
+	Failures      FailureReport        `json:"failures,omitempty"`
 	Matches       []ImportMatch        `json:"matches"`
 	PersonMatches []ImportMatch        `json:"personMatches,omitempty"`
 	Summary       storage.Summary      `json:"summary"`
 	WritesSkipped int                  `json:"writesSkipped,omitempty"`
+}
+
+type ImportTarget struct {
+	ServerName string `json:"serverName,omitempty"`
+	ServerID   string `json:"serverId,omitempty"`
+	Version    string `json:"version,omitempty"`
+	BaseURL    string `json:"baseUrl,omitempty"`
+}
+
+type ImportDiff struct {
+	Mode     string          `json:"mode,omitempty"`
+	Note     string          `json:"note,omitempty"`
+	Expected storage.Summary `json:"expected,omitempty"`
+	Actual   storage.Summary `json:"actual,omitempty"`
+	Missing  ImportDiffGap   `json:"missing,omitempty"`
+	Before   storage.Summary `json:"before,omitempty"`
+	After    storage.Summary `json:"after,omitempty"`
+}
+
+type ImportDiffGap struct {
+	Metadata     int `json:"metadata,omitempty"`
+	ItemImages   int `json:"itemImages,omitempty"`
+	PeopleImages int `json:"peopleImages,omitempty"`
+	Unmatched    int `json:"unmatched,omitempty"`
+	Ambiguous    int `json:"ambiguous,omitempty"`
+	Errors       int `json:"errors,omitempty"`
+}
+
+type ImportIncremental struct {
+	Source             string `json:"source,omitempty"`
+	BaselineExportName string `json:"baselineExportName,omitempty"`
+	BaselineExportPath string `json:"baselineExportPath,omitempty"`
+	ChangedItems       int    `json:"changedItems,omitempty"`
+	SkippedItems       int    `json:"skippedItems,omitempty"`
+	TargetMode         string `json:"targetMode,omitempty"`
+	Note               string `json:"note,omitempty"`
+}
+
+type ImportSkipReport struct {
+	Total               int `json:"total,omitempty"`
+	IncrementalManifest int `json:"incrementalManifest,omitempty"`
+	Resume              int `json:"resume,omitempty"`
+	DryRunWrites        int `json:"dryRunWrites,omitempty"`
+}
+
+type FailureReport struct {
+	Severity          string           `json:"severity,omitempty"`
+	All               []FailureExample `json:"all,omitempty"`
+	Unmatched         []FailureExample `json:"unmatched,omitempty"`
+	Ambiguous         []FailureExample `json:"ambiguous,omitempty"`
+	Failed            []FailureExample `json:"failed,omitempty"`
+	ImageFailed       []FailureExample `json:"imageFailed,omitempty"`
+	PersonImageFailed []FailureExample `json:"personImageFailed,omitempty"`
+	Counts            *FailureCounts   `json:"counts,omitempty"`
+	Total             int              `json:"total,omitempty"`
+	Truncated         bool             `json:"truncated,omitempty"`
+}
+
+type FailureCounts struct {
+	Unmatched         int `json:"unmatched,omitempty"`
+	Ambiguous         int `json:"ambiguous,omitempty"`
+	Failed            int `json:"failed,omitempty"`
+	ImageFailed       int `json:"imageFailed,omitempty"`
+	PersonImageFailed int `json:"personImageFailed,omitempty"`
+}
+
+type FailureExample struct {
+	StableKey  string   `json:"stableKey,omitempty"`
+	SourceName string   `json:"sourceName,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Candidates []string `json:"candidates,omitempty"`
+}
+
+type importCheckpoint struct {
+	SchemaVersion int                         `json:"schemaVersion"`
+	Target        ImportTarget                `json:"target,omitempty"`
+	UpdatedAt     time.Time                   `json:"updatedAt"`
+	Items         map[string]ImportCheckpoint `json:"items,omitempty"`
+	PersonAvatars map[string]ImportCheckpoint `json:"personAvatars,omitempty"`
+}
+
+type ImportCheckpoint struct {
+	StableKey     string    `json:"stableKey"`
+	SourceName    string    `json:"sourceName,omitempty"`
+	TargetID      string    `json:"targetId,omitempty"`
+	TargetName    string    `json:"targetName,omitempty"`
+	Status        string    `json:"status"`
+	ImageFailures int       `json:"imageFailures,omitempty"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type ImportMatch struct {
@@ -212,13 +317,16 @@ type personLookupCall struct {
 }
 
 type personImageTask struct {
-	Name string
-	Path string
+	StableKey string
+	Name      string
+	Path      string
 }
 
 type personImageResult struct {
-	Name string
-	Err  error
+	StableKey string
+	Name      string
+	TargetID  string
+	Err       error
 }
 
 func newImportLookupCache() *importLookupCache {
@@ -228,17 +336,19 @@ func newImportLookupCache() *importLookupCache {
 	}
 }
 
-func (c *importLookupCache) searchItems(ctx context.Context, client *emby.Client, searchTerm, includeTypes string, limit int) ([]emby.Item, error) {
-	key := fmt.Sprintf("search:%s:%s:%d", strings.ToLower(strings.TrimSpace(searchTerm)), strings.ToLower(strings.TrimSpace(includeTypes)), limit)
+func (c *importLookupCache) searchItems(ctx context.Context, client *emby.Client, searchTerm, includeTypes string, limit int, libraryIDs []string) ([]emby.Item, error) {
+	libraryIDs = normalizeTargetLibraryIDs(libraryIDs)
+	key := fmt.Sprintf("search:%s:%s:%d:%s", strings.ToLower(strings.TrimSpace(searchTerm)), strings.ToLower(strings.TrimSpace(includeTypes)), limit, targetLibraryCacheKey(libraryIDs))
 	return c.itemLookup(ctx, key, func() ([]emby.Item, error) {
-		return client.SearchItems(ctx, searchTerm, includeTypes, limit)
+		return client.SearchItemsInLibraries(ctx, searchTerm, includeTypes, limit, libraryIDs)
 	})
 }
 
-func (c *importLookupCache) itemsByProviderID(ctx context.Context, client *emby.Client, providerID string) ([]emby.Item, error) {
-	key := "provider:" + strings.ToLower(strings.TrimSpace(providerID))
+func (c *importLookupCache) itemsByProviderID(ctx context.Context, client *emby.Client, providerID string, libraryIDs []string) ([]emby.Item, error) {
+	libraryIDs = normalizeTargetLibraryIDs(libraryIDs)
+	key := "provider:" + strings.ToLower(strings.TrimSpace(providerID)) + ":" + targetLibraryCacheKey(libraryIDs)
 	return c.itemLookup(ctx, key, func() ([]emby.Item, error) {
-		return client.ItemsByProviderID(ctx, providerID)
+		return client.ItemsByProviderIDInLibraries(ctx, providerID, libraryIDs)
 	})
 }
 
@@ -417,6 +527,23 @@ func exportDirectoryName(exportedAt time.Time, serverName string, libraries []em
 	return storage.SafeName(strings.Join(parts, "-"))
 }
 
+func (s *Service) uniqueExportDirectory(baseName string) (string, string) {
+	baseName = storage.SafeName(baseName)
+	if baseName == "" {
+		baseName = time.Now().Format("20060102-150405")
+	}
+	for i := 0; ; i++ {
+		name := baseName
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d", baseName, i+1)
+		}
+		dir := filepath.Join(s.ExportsDir(), name)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			return name, dir
+		}
+	}
+}
+
 func (s *Service) ListExports() ([]string, error) {
 	dir := s.ExportsDir()
 	entries, err := os.ReadDir(dir)
@@ -437,6 +564,64 @@ func (s *Service) ListExports() ([]string, error) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(out)))
 	return out, nil
+}
+
+func (s *Service) latestBaselineManifest(source string, libraries []emby.Library, excludeName string) (storage.Manifest, string, string, bool) {
+	exports, err := s.ListExports()
+	if err != nil {
+		return storage.Manifest{}, "", "", false
+	}
+	wantLibraries := libraryNameSet(libraries)
+	for _, name := range exports {
+		if name == excludeName {
+			continue
+		}
+		path := filepath.Join(s.ExportsDir(), name, "manifest.json")
+		var manifest storage.Manifest
+		if err := storage.ReadJSON(path, &manifest); err != nil {
+			continue
+		}
+		if strings.TrimRight(manifest.Source, "/") != strings.TrimRight(source, "/") {
+			continue
+		}
+		if !sameLibrarySet(wantLibraries, manifest.Libraries) {
+			continue
+		}
+		return manifest, name, filepath.Dir(path), true
+	}
+	return storage.Manifest{}, "", "", false
+}
+
+func libraryNameSet(libraries []emby.Library) map[string]bool {
+	out := map[string]bool{}
+	for _, lib := range libraries {
+		if strings.TrimSpace(lib.Name) != "" {
+			out[strings.TrimSpace(lib.Name)] = true
+		}
+	}
+	return out
+}
+
+func sameLibrarySet(want map[string]bool, got []storage.LibraryEntry) bool {
+	if len(want) != len(got) {
+		return false
+	}
+	for _, lib := range got {
+		if !want[strings.TrimSpace(lib.Name)] {
+			return false
+		}
+	}
+	return true
+}
+
+func manifestItemsByStableKey(manifest storage.Manifest) map[string]storage.ItemEntry {
+	out := map[string]storage.ItemEntry{}
+	for _, item := range manifest.Items {
+		if strings.TrimSpace(item.StableKey) != "" {
+			out[item.StableKey] = item
+		}
+	}
+	return out
 }
 
 func (s *Service) ResolveExportPath(exportPath string) (string, string, error) {
@@ -505,6 +690,7 @@ func (s *Service) ListImportReports(exportPath string) ([]ImportReportInfo, erro
 			DryRun:        report.DryRun,
 			StartedAt:     report.StartedAt,
 			EndedAt:       report.EndedAt,
+			Target:        report.Target,
 			Compatibility: report.Compatibility,
 			Summary:       report.Summary,
 		})
@@ -586,24 +772,24 @@ func parseMajorMinor(version string) (int, int, bool) {
 
 func ValidateExportPackage(exportPath string, manifest storage.Manifest) PackageValidation {
 	validation := PackageValidation{}
-	check := func(scope, relPath string) {
-		if strings.TrimSpace(relPath) == "" {
+	check := func(scope string, file storage.FileEntry) {
+		if strings.TrimSpace(file.Path) == "" {
 			validation.InvalidPaths++
 			validation.addError("%s 路径为空", scope)
 			return
 		}
 		validation.CheckedFiles++
-		path, err := safePackagePath(exportPath, relPath)
+		path, err := safePackagePath(exportPath, file.Path)
 		if err != nil {
 			validation.InvalidPaths++
-			validation.addError("%s 路径无效：%s", scope, relPath)
+			validation.addError("%s 路径无效：%s", scope, file.Path)
 			return
 		}
 		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				validation.MissingFiles++
-				validation.addError("%s 文件缺失：%s", scope, relPath)
+				validation.addError("%s 文件缺失：%s", scope, file.Path)
 				return
 			}
 			validation.InvalidPaths++
@@ -612,43 +798,66 @@ func ValidateExportPackage(exportPath string, manifest storage.Manifest) Package
 		}
 		if info.IsDir() {
 			validation.InvalidPaths++
-			validation.addError("%s 指向目录：%s", scope, relPath)
+			validation.addError("%s 指向目录：%s", scope, file.Path)
+			return
+		}
+		if file.Size > 0 && info.Size() != file.Size {
+			validation.SizeMismatches++
+			validation.addError("%s 文件大小不一致：%s", scope, file.Path)
+		}
+		if strings.TrimSpace(file.SHA256) != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				validation.InvalidPaths++
+				validation.addError("%s 无法读取校验：%s", scope, err)
+				return
+			}
+			sum := sha256.Sum256(data)
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(file.SHA256)) {
+				validation.ChecksumMismatches++
+				validation.addError("%s SHA256 不一致：%s", scope, file.Path)
+			}
 		}
 	}
-	check("manifest", "manifest.json")
+	check("manifest", storage.FileEntry{Path: "manifest.json"})
 	for _, item := range manifest.Items {
+		if item.Skipped {
+			continue
+		}
 		label := item.Name
 		if strings.TrimSpace(label) == "" {
 			label = item.StableKey
 		}
-		check("项目元数据 "+label, item.InfoPath)
+		check("项目元数据 "+label, storage.FileEntry{Path: item.InfoPath})
 		if strings.TrimSpace(item.RawPath) != "" {
-			check("项目原始数据 "+label, item.RawPath)
+			check("项目原始数据 "+label, storage.FileEntry{Path: item.RawPath})
 		}
 		for _, image := range item.Images {
-			check(fmt.Sprintf("媒体图片 %s/%s", label, image.Type), image.Path)
+			check(fmt.Sprintf("媒体图片 %s/%s", label, image.Type), image)
 		}
 	}
 	for _, person := range manifest.People {
 		if person.Image != nil {
-			check("人物头像 "+person.Name, person.Image.Path)
+			check("人物头像 "+person.Name, *person.Image)
 		}
 	}
 	return validation
 }
 
 func (v PackageValidation) OK() bool {
-	return v.MissingFiles == 0 && v.InvalidPaths == 0
+	return v.MissingFiles == 0 && v.InvalidPaths == 0 && v.SizeMismatches == 0 && v.ChecksumMismatches == 0
 }
 
 func (v PackageValidation) Error() string {
 	if v.OK() {
 		return ""
 	}
-	return fmt.Sprintf("导出包校验失败：检查 %d 个文件，缺失 %d 个，路径无效 %d 个。%s",
+	return fmt.Sprintf("导出包校验失败：检查 %d 个文件，缺失 %d 个，路径无效 %d 个，大小不一致 %d 个，SHA256 不一致 %d 个。%s",
 		v.CheckedFiles,
 		v.MissingFiles,
 		v.InvalidPaths,
+		v.SizeMismatches,
+		v.ChecksumMismatches,
 		strings.Join(v.Errors, "；"),
 	)
 }
@@ -734,8 +943,7 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 	}
 
 	exportedAt := time.Now()
-	exportName := exportDirectoryName(exportedAt, info.ServerName, libraries)
-	exportDir := filepath.Join(s.ExportsDir(), exportName)
+	exportName, exportDir := s.uniqueExportDirectory(exportDirectoryName(exportedAt, info.ServerName, libraries))
 	if err := os.MkdirAll(exportDir, 0o755); err != nil {
 		return ExportResult{}, err
 	}
@@ -747,9 +955,24 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 		Compatibility: "emby-4.8.11-first",
 		Source:        client.BaseURL,
 	}
+	baselineItems := map[string]storage.ItemEntry{}
+	if req.Incremental {
+		manifest.Incremental = &storage.Incremental{Enabled: true, CreatedAt: time.Now()}
+		if baseline, baselineName, baselinePath, ok := s.latestBaselineManifest(client.BaseURL, libraries, exportName); ok {
+			baselineItems = manifestItemsByStableKey(baseline)
+			manifest.Incremental.BaselineExportName = baselineName
+			manifest.Incremental.BaselineExportPath = filepath.ToSlash(baselinePath)
+			j.Log("info", "增量导出基线：%s", baselineName)
+		} else {
+			j.Log("info", "增量导出未找到可用基线，本次按全量导出处理")
+		}
+	}
 
 	people := newPeopleRegistry()
 	for _, lib := range libraries {
+		if err := j.WaitIfPaused(ctx); err != nil {
+			return ExportResult{}, err
+		}
 		select {
 		case <-ctx.Done():
 			return ExportResult{}, ctx.Err()
@@ -774,7 +997,7 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 				Slug:  storage.UniqueSlug(itemDirectoryBase(item), usedItemSlugs),
 			})
 		}
-		results, err := s.exportLibraryItems(ctx, j, client, exportDir, lib, tasks, imageTypeSet, req, people, concurrency)
+		results, err := s.exportLibraryItems(ctx, j, client, exportDir, lib, tasks, imageTypeSet, req, people, concurrency, baselineItems)
 		if err != nil {
 			return ExportResult{}, err
 		}
@@ -786,6 +1009,14 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 			}
 			entry := result.Entry
 			manifest.Items = append(manifest.Items, entry)
+			if entry.Skipped {
+				manifest.Summary.SkippedItems++
+				if manifest.Incremental != nil {
+					manifest.Incremental.SkippedItems++
+				}
+			} else if manifest.Incremental != nil {
+				manifest.Incremental.ChangedItems++
+			}
 			manifest.Summary.ItemImages += len(entry.Images)
 		}
 	}
@@ -929,6 +1160,9 @@ func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *em
 	go func() {
 		defer close(taskCh)
 		for _, task := range tasks {
+			if err := j.WaitIfPaused(ctx); err != nil {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1011,7 +1245,7 @@ func (s *Service) exportPersonImage(ctx context.Context, client *emby.Client, ex
 	return exportPersonImageResult{Name: task.Name, Exported: true}
 }
 
-func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *emby.Client, exportDir string, lib emby.Library, tasks []exportItemTask, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, concurrency int) ([]exportItemResult, error) {
+func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *emby.Client, exportDir string, lib emby.Library, tasks []exportItemTask, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, concurrency int, baselineItems map[string]storage.ItemEntry) ([]exportItemResult, error) {
 	results := make([]exportItemResult, len(tasks))
 	if len(tasks) == 0 {
 		return results, nil
@@ -1024,7 +1258,7 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	for i := 0; i < workers; i++ {
 		go func() {
 			for task := range taskCh {
-				entry, err := s.exportItem(ctx, client, exportDir, lib, task.Item, task.Slug, imageTypeSet, req, people)
+				entry, err := s.exportItem(ctx, client, exportDir, lib, task.Item, task.Slug, imageTypeSet, req, people, baselineItems)
 				resultCh <- exportItemResult{Index: task.Index, Item: task.Item, Entry: entry, Err: err}
 			}
 		}()
@@ -1033,6 +1267,9 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	go func() {
 		defer close(taskCh)
 		for _, task := range tasks {
+			if err := j.WaitIfPaused(ctx); err != nil {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1063,9 +1300,10 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	return results, nil
 }
 
-func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry) (storage.ItemEntry, error) {
+func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, baselineItems map[string]storage.ItemEntry) (storage.ItemEntry, error) {
 	item = s.enrichExportItem(ctx, client, item)
 	stableKey := storage.StableItemKey(item)
+	fingerprint := itemFingerprint(item)
 	itemDir := filepath.Join(exportDir, "libraries", storage.SafeName(lib.Name), "items", itemSlug)
 	infoRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "info.json"))
 	rawRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "raw.json"))
@@ -1086,8 +1324,16 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		IndexNumber:       item.IndexNumber,
 		ParentIndexNumber: item.ParentIndexNumber,
 		ProviderIDs:       item.ProviderIDs,
+		Fingerprint:       fingerprint,
 		InfoPath:          infoRel,
 		RawPath:           rawRel,
+	}
+	if req.Incremental {
+		if baseline, ok := baselineItems[stableKey]; ok && baseline.Fingerprint != "" && baseline.Fingerprint == fingerprint {
+			entry.Skipped = true
+			entry.SkipReason = "unchanged"
+			return entry, nil
+		}
 	}
 
 	if !req.SkipImages {
@@ -1256,6 +1502,107 @@ func mergeProviderIDs(a, b map[string]string) map[string]string {
 	return a
 }
 
+func itemFingerprint(item emby.Item) string {
+	raw := map[string]any{
+		"name":              item.Name,
+		"type":              item.Type,
+		"path":              item.Path,
+		"originalTitle":     item.OriginalTitle,
+		"overview":          item.Overview,
+		"officialRating":    item.OfficialRating,
+		"productionYear":    item.ProductionYear,
+		"premiereDate":      item.PremiereDate,
+		"communityRating":   item.CommunityRating,
+		"genres":            sortedStrings(item.Genres),
+		"studios":           sortedNameIDs(item.Studios),
+		"tags":              sortedStrings(item.Tags),
+		"taglines":          sortedStrings(item.Taglines),
+		"providerIds":       sortedStringMap(item.ProviderIDs),
+		"people":            sortedPeopleFingerprint(item.People),
+		"seriesName":        item.SeriesName,
+		"seasonName":        item.SeasonName,
+		"indexNumber":       item.IndexNumber,
+		"parentIndexNumber": item.ParentIndexNumber,
+		"imageTags":         sortedStringMap(item.ImageTags),
+		"backdropTags":      sortedStrings(item.BackdropImageTags),
+	}
+	data, _ := json.Marshal(raw)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func sortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
+}
+
+func sortedStringMap(values map[string]string) []string {
+	out := make([]string, 0, len(values))
+	for key, value := range values {
+		out = append(out, strings.ToLower(key)+"="+value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedNameIDs(values []emby.NameID) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, value.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func importTargetLibraryIDs(req ImportRequest) []string {
+	if ids := normalizeTargetLibraryIDs(req.TargetLibraryIDs); len(ids) > 0 {
+		return ids
+	}
+	return normalizeTargetLibraryIDs(req.LibraryIDs)
+}
+
+func normalizeTargetLibraryIDs(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func targetLibraryCacheKey(libraryIDs []string) string {
+	libraryIDs = normalizeTargetLibraryIDs(libraryIDs)
+	if len(libraryIDs) == 0 {
+		return "all"
+	}
+	return "libraries:" + strings.Join(libraryIDs, ",")
+}
+
+func sortedPeopleFingerprint(values []emby.Person) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, strings.Join([]string{
+			value.Name,
+			value.Type,
+			value.Role,
+			strings.Join(sortedStringMap(value.ProviderIDs), "|"),
+		}, "/"))
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (ImportResult, error) {
 	client, err := emby.NewClient(req.Connection.BaseURL, req.Connection.APIKey)
 	if err != nil {
@@ -1281,9 +1628,40 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 		return ImportResult{}, errors.New(validation.Error())
 	}
 	profile := BuildCompatibilityProfile(manifest.EmbyVersion, targetInfo.Version)
-	report := ImportReport{StartedAt: time.Now(), DryRun: req.DryRun, Compatibility: profile}
+	report := ImportReport{
+		StartedAt:     time.Now(),
+		DryRun:        req.DryRun,
+		Target:        importTargetFromSystemInfo(targetInfo),
+		Compatibility: profile,
+	}
+	report.Target.BaseURL = strings.TrimRight(req.Connection.BaseURL, "/")
+	report.Diff = initialImportDiff(manifest.Summary)
+	report.Incremental = importIncrementalReport(manifest)
 	concurrency := normalizeConcurrency(req.Concurrency)
-	j.Log("info", "读取导出包：%s，共 %d 个项目", exportPath, len(manifest.Items))
+	items := importableManifestItems(manifest.Items)
+	if skipped := len(manifest.Items) - len(items); skipped > 0 {
+		addSkippedWrites(&report, "incremental-manifest", skipped)
+		j.Log("info", "增量导出包跳过未变化项目：%d 个", skipped)
+	}
+	resumeDone := map[string]bool{}
+	if req.Resume {
+		if done, reportName := s.resumeSuccessfulItems(exportPath, report.Target); len(done) > 0 {
+			resumeDone = done
+			j.Log("info", "断点续跑：读取上次报告 %s，跳过已成功项目 %d 个", reportName, len(done))
+		}
+	}
+	if len(resumeDone) > 0 {
+		filtered := items[:0]
+		for _, item := range items {
+			if resumeDone[item.StableKey] {
+				addSkippedWrites(&report, "resume", 1)
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		items = filtered
+	}
+	j.Log("info", "读取导出包：%s，共 %d 个项目，本次处理 %d 个项目", exportPath, len(manifest.Items), len(items))
 	j.Log("info", "导出包校验通过：检查 %d 个文件", validation.CheckedFiles)
 	j.Log("info", "兼容策略：%s（源 Emby %s -> 目标 Emby %s）", profile.Name, emptyDash(profile.SourceVersion), emptyDash(profile.TargetVersion))
 	j.Log("info", "导入并发数：%d", concurrency)
@@ -1291,7 +1669,14 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 		j.Log("info", "[DRY] 本次只验证匹配，不会写入元数据和图片")
 	}
 	cache := newImportLookupCache()
-	itemResults, err := s.importItems(ctx, j, client, cache, exportPath, manifest.Items, req, concurrency)
+	checkpoint := newImportCheckpointStore(exportPath, report.Target)
+	itemResults, err := s.importItems(ctx, j, client, cache, exportPath, items, req, concurrency, func(match ImportMatch) {
+		if shouldCheckpointMatch(match, req.DryRun) {
+			if err := checkpoint.Record(match); err != nil {
+				j.Log("warn", "写入断点状态失败：%v", err)
+			}
+		}
+	})
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -1299,14 +1684,28 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 		match := result.Match
 		report.Matches = append(report.Matches, match)
 		addImportMatchSummary(&report, match, req.DryRun)
+		addFailureExample(&report.Failures, match)
+		addImageFailureExamples(&report.Failures, match)
 	}
 	if !req.SkipImages && req.IncludePeopleImages {
-		if err := s.importPeopleImages(ctx, client, cache, exportPath, manifest, &report, j, req.DryRun, concurrency); err != nil {
+		if err := s.importPeopleImages(ctx, client, cache, checkpoint, exportPath, manifest, &report, j, req.Resume, req.DryRun, concurrency); err != nil {
 			return ImportResult{}, err
 		}
 	}
+	if report.Skips != nil {
+		j.Log("info", "Import skipped writes: incremental-manifest %d, resume %d, dry-run %d, total %d",
+			report.Skips.IncrementalManifest,
+			report.Skips.Resume,
+			report.Skips.DryRunWrites,
+			report.Skips.Total,
+		)
+	}
 	report.EndedAt = time.Now()
-	reportPath := filepath.Join(exportPath, "import-report-"+time.Now().Format("20060102-150405")+".json")
+	report.Diff = finalizeImportDiff(report.Diff, report.Summary)
+	reportPath, err := nextImportReportPath(exportPath, time.Now())
+	if err != nil {
+		return ImportResult{}, err
+	}
 	if err := storage.WriteJSON(reportPath, report); err != nil {
 		return ImportResult{}, err
 	}
@@ -1344,6 +1743,44 @@ func importSummaryLine(report ImportReport) string {
 	)
 }
 
+func importTargetFromSystemInfo(info emby.SystemInfo) ImportTarget {
+	return ImportTarget{
+		ServerName: strings.TrimSpace(info.ServerName),
+		ServerID:   strings.TrimSpace(info.ID),
+		Version:    strings.TrimSpace(info.Version),
+	}
+}
+
+func initialImportDiff(expected storage.Summary) ImportDiff {
+	return ImportDiff{
+		Mode:     "package-vs-run",
+		Note:     "对比导出包期望数量与本次导入实际写入结果；不是目标 Emby 数据库的完整前后快照。",
+		Expected: expected,
+		Before:   expected,
+	}
+}
+
+func finalizeImportDiff(diff ImportDiff, actual storage.Summary) ImportDiff {
+	diff.Actual = actual
+	diff.After = actual
+	diff.Missing = ImportDiffGap{
+		Metadata:     positiveDiff(diff.Expected.Items-diff.Expected.SkippedItems, actual.MetadataUpdated),
+		ItemImages:   positiveDiff(diff.Expected.ItemImages, actual.ItemImagesPushed),
+		PeopleImages: positiveDiff(diff.Expected.PeopleImages, actual.PeopleImages),
+		Unmatched:    actual.Unmatched,
+		Ambiguous:    actual.Ambiguous,
+		Errors:       actual.Errors + actual.ItemImagesFailed + actual.PeopleImagesFailed,
+	}
+	return diff
+}
+
+func positiveDiff(expected, actual int) int {
+	if expected <= actual {
+		return 0
+	}
+	return expected - actual
+}
+
 func reportElapsed(report ImportReport) time.Duration {
 	if report.StartedAt.IsZero() {
 		return 0
@@ -1358,11 +1795,305 @@ func reportElapsed(report ImportReport) time.Duration {
 	return end.Sub(report.StartedAt)
 }
 
+func importableManifestItems(items []storage.ItemEntry) []storage.ItemEntry {
+	out := make([]storage.ItemEntry, 0, len(items))
+	for _, item := range items {
+		if item.Skipped {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func nextImportReportPath(exportPath string, now time.Time) (string, error) {
+	base := "import-report-" + now.Format("20060102-150405.000000000")
+	for i := 0; i < 1000; i++ {
+		name := base + ".json"
+		if i > 0 {
+			name = fmt.Sprintf("%s-%03d.json", base, i+1)
+		}
+		reportPath := filepath.Join(exportPath, name)
+		if _, err := os.Stat(reportPath); err != nil {
+			if os.IsNotExist(err) {
+				return reportPath, nil
+			}
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("cannot allocate unique import report name")
+}
+
+func importIncrementalReport(manifest storage.Manifest) *ImportIncremental {
+	if manifest.Incremental == nil {
+		return nil
+	}
+	report := &ImportIncremental{
+		Source:             "manifest",
+		BaselineExportName: manifest.Incremental.BaselineExportName,
+		BaselineExportPath: manifest.Incremental.BaselineExportPath,
+		ChangedItems:       manifest.Incremental.ChangedItems,
+		SkippedItems:       manifest.Incremental.SkippedItems,
+		TargetMode:         "package-only",
+		Note:               "Import skips items marked unchanged by the export manifest; it does not perform target-side incremental comparison.",
+	}
+	if report.SkippedItems == 0 {
+		report.SkippedItems = countSkippedManifestItems(manifest.Items)
+	}
+	if report.ChangedItems == 0 && len(manifest.Items) > 0 {
+		report.ChangedItems = len(manifest.Items) - report.SkippedItems
+	}
+	return report
+}
+
+func countSkippedManifestItems(items []storage.ItemEntry) int {
+	count := 0
+	for _, item := range items {
+		if item.Skipped {
+			count++
+		}
+	}
+	return count
+}
+
+func addSkippedWrites(report *ImportReport, source string, count int) {
+	if count <= 0 {
+		return
+	}
+	if report.Skips == nil {
+		report.Skips = &ImportSkipReport{}
+	}
+	report.WritesSkipped += count
+	report.Skips.Total += count
+	switch source {
+	case "incremental-manifest":
+		report.Skips.IncrementalManifest += count
+	case "resume":
+		report.Skips.Resume += count
+	case "dry-run":
+		report.Skips.DryRunWrites += count
+	}
+}
+
+func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget) (map[string]bool, string) {
+	entries, err := os.ReadDir(exportPath)
+	if err != nil {
+		return nil, ""
+	}
+	done := map[string]bool{}
+	sources := make([]string, 0)
+	if checkpoint, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target); ok {
+		for key, item := range checkpoint.Items {
+			if shouldResumeItemCheckpoint(item) {
+				done[key] = true
+			}
+		}
+		if len(done) > 0 {
+			sources = append(sources, "import-checkpoint.json")
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() || !isImportReportFile(entry.Name()) {
+			continue
+		}
+		var report ImportReport
+		if err := storage.ReadJSON(filepath.Join(exportPath, entry.Name()), &report); err != nil {
+			continue
+		}
+		if !sameImportTarget(report.Target, target) {
+			continue
+		}
+		added := 0
+		for _, match := range report.Matches {
+			if shouldResumeMatch(match, report.DryRun) {
+				done[match.StableKey] = true
+				added++
+			}
+		}
+		if added > 0 {
+			sources = append(sources, entry.Name())
+		}
+	}
+	if len(done) == 0 {
+		return nil, ""
+	}
+	return done, strings.Join(sources, ",")
+}
+
+func readImportCheckpoint(path string, target ImportTarget) (importCheckpoint, bool) {
+	var checkpoint importCheckpoint
+	if err := storage.ReadJSON(path, &checkpoint); err != nil {
+		return importCheckpoint{}, false
+	}
+	if !sameImportTarget(checkpoint.Target, target) {
+		return importCheckpoint{}, false
+	}
+	return checkpoint, true
+}
+
+func shouldResumeStatus(status string, dryRun bool) bool {
+	switch status {
+	case "updated":
+		return true
+	case "matched":
+		return !dryRun
+	default:
+		return false
+	}
+}
+
+func shouldResumeMatch(match ImportMatch, dryRun bool) bool {
+	if match.ImageFailures > 0 {
+		return false
+	}
+	return shouldResumeStatus(match.Status, dryRun)
+}
+
+func shouldResumeItemCheckpoint(item ImportCheckpoint) bool {
+	if item.ImageFailures > 0 {
+		return false
+	}
+	return shouldResumeStatus(item.Status, false)
+}
+
+func shouldResumePersonAvatarCheckpoint(item ImportCheckpoint) bool {
+	return item.Status == "uploaded"
+}
+
+func sameImportTarget(a, b ImportTarget) bool {
+	aID := strings.TrimSpace(a.ServerID)
+	bID := strings.TrimSpace(b.ServerID)
+	if aID != "" && bID != "" {
+		return aID == bID
+	}
+	if aID != "" || bID != "" {
+		return false
+	}
+	aName := strings.TrimSpace(a.ServerName)
+	bName := strings.TrimSpace(b.ServerName)
+	aVersion := strings.TrimSpace(a.Version)
+	bVersion := strings.TrimSpace(b.Version)
+	if aName == "" && aVersion == "" && bName == "" && bVersion == "" {
+		return true
+	}
+	if aName == "" || bName == "" || aVersion == "" || bVersion == "" {
+		return false
+	}
+	return aName == bName && aVersion == bVersion
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+type importCheckpointStore struct {
+	path   string
+	target ImportTarget
+	mu     sync.Mutex
+}
+
+func newImportCheckpointStore(exportPath string, target ImportTarget) *importCheckpointStore {
+	return &importCheckpointStore{
+		path:   filepath.Join(exportPath, "import-checkpoint.json"),
+		target: target,
+	}
+}
+
+func (s *importCheckpointStore) Record(match ImportMatch) error {
+	if s == nil || strings.TrimSpace(match.StableKey) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	checkpoint := importCheckpoint{SchemaVersion: 1, Target: s.target, Items: map[string]ImportCheckpoint{}}
+	if err := storage.ReadJSON(s.path, &checkpoint); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !sameImportTarget(checkpoint.Target, s.target) {
+		checkpoint.Items = map[string]ImportCheckpoint{}
+		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
+	}
+	if checkpoint.Items == nil {
+		checkpoint.Items = map[string]ImportCheckpoint{}
+	}
+	now := time.Now()
+	checkpoint.SchemaVersion = 1
+	checkpoint.Target = s.target
+	checkpoint.UpdatedAt = now
+	checkpoint.Items[match.StableKey] = ImportCheckpoint{
+		StableKey:     match.StableKey,
+		SourceName:    match.SourceName,
+		TargetID:      firstNonEmpty(match.TargetID, match.TargetEmbyID),
+		TargetName:    match.TargetName,
+		Status:        match.Status,
+		ImageFailures: match.ImageFailures,
+		UpdatedAt:     now,
+	}
+	return storage.WriteJSON(s.path, checkpoint)
+}
+
+func (s *importCheckpointStore) RecordPersonAvatar(result personImageResult) error {
+	if s == nil || strings.TrimSpace(result.StableKey) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	checkpoint := importCheckpoint{SchemaVersion: 1, Target: s.target, Items: map[string]ImportCheckpoint{}, PersonAvatars: map[string]ImportCheckpoint{}}
+	if err := storage.ReadJSON(s.path, &checkpoint); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !sameImportTarget(checkpoint.Target, s.target) {
+		checkpoint.Items = map[string]ImportCheckpoint{}
+		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
+	}
+	if checkpoint.Items == nil {
+		checkpoint.Items = map[string]ImportCheckpoint{}
+	}
+	if checkpoint.PersonAvatars == nil {
+		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
+	}
+	now := time.Now()
+	checkpoint.SchemaVersion = 1
+	checkpoint.Target = s.target
+	checkpoint.UpdatedAt = now
+	checkpoint.PersonAvatars[result.StableKey] = ImportCheckpoint{
+		StableKey:  result.StableKey,
+		SourceName: result.Name,
+		TargetID:   result.TargetID,
+		Status:     "uploaded",
+		UpdatedAt:  now,
+	}
+	return storage.WriteJSON(s.path, checkpoint)
+}
+
 func emptyDash(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "-"
 	}
 	return value
+}
+
+func shouldCheckpointMatch(match ImportMatch, dryRun bool) bool {
+	if dryRun || strings.TrimSpace(match.StableKey) == "" {
+		return false
+	}
+	if match.ImageFailures > 0 {
+		return false
+	}
+	switch match.Status {
+	case "updated":
+		return true
+	case "matched":
+		return true
+	default:
+		return false
+	}
 }
 
 func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool) {
@@ -1373,7 +2104,7 @@ func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool)
 	case "matched":
 		report.Summary.Matched++
 		if dryRun {
-			report.WritesSkipped++
+			addSkippedWrites(report, "dry-run", 1)
 		}
 	case "ambiguous":
 		report.Summary.Ambiguous++
@@ -1386,7 +2117,124 @@ func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool)
 	report.Summary.ItemImagesFailed += match.ImageFailures
 }
 
-func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Client, cache *importLookupCache, exportPath string, items []storage.ItemEntry, req ImportRequest, concurrency int) ([]importItemResult, error) {
+func addFailureExample(report *FailureReport, match ImportMatch) {
+	example := FailureExample{
+		StableKey:  match.StableKey,
+		SourceName: match.SourceName,
+		Status:     match.Status,
+		Reason:     match.Reason,
+		Error:      match.Error,
+		Candidates: append([]string(nil), match.Candidates...),
+	}
+	switch match.Status {
+	case "unmatched":
+		counts := failureCounts(report)
+		counts.Unmatched++
+		report.Total++
+		report.All = append(report.All, example)
+		report.Unmatched = appendLimitedFailure(report.Unmatched, example)
+	case "ambiguous":
+		counts := failureCounts(report)
+		counts.Ambiguous++
+		report.Total++
+		report.All = append(report.All, example)
+		report.Ambiguous = appendLimitedFailure(report.Ambiguous, example)
+	case "failed":
+		counts := failureCounts(report)
+		counts.Failed++
+		report.Total++
+		report.All = append(report.All, example)
+		report.Failed = appendLimitedFailure(report.Failed, example)
+	}
+	finalizeFailureReport(report)
+}
+
+func addImageFailureExamples(report *FailureReport, match ImportMatch) {
+	if match.ImageFailures <= 0 {
+		return
+	}
+	counts := failureCounts(report)
+	for _, errText := range match.ImageErrors {
+		example := FailureExample{
+			StableKey:  match.StableKey,
+			SourceName: match.SourceName,
+			Status:     "image-failed",
+			Reason:     "item-image",
+			Error:      errText,
+		}
+		counts.ImageFailed++
+		report.Total++
+		report.All = append(report.All, example)
+		report.ImageFailed = appendLimitedFailure(report.ImageFailed, example)
+	}
+	if len(match.ImageErrors) == 0 {
+		example := FailureExample{
+			StableKey:  match.StableKey,
+			SourceName: match.SourceName,
+			Status:     "image-failed",
+			Reason:     "item-image",
+			Error:      fmt.Sprintf("%d image(s) failed", match.ImageFailures),
+		}
+		counts.ImageFailed += match.ImageFailures
+		report.Total += match.ImageFailures
+		report.All = append(report.All, example)
+		report.ImageFailed = appendLimitedFailure(report.ImageFailed, example)
+	}
+	finalizeFailureReport(report)
+}
+
+func addPersonImageFailureExample(report *FailureReport, name string, err error) {
+	if err == nil {
+		return
+	}
+	counts := failureCounts(report)
+	example := FailureExample{
+		SourceName: strings.TrimSpace(name),
+		Status:     "person-image-failed",
+		Reason:     "person-image",
+		Error:      err.Error(),
+	}
+	counts.PersonImageFailed++
+	report.Total++
+	report.All = append(report.All, example)
+	report.PersonImageFailed = appendLimitedFailure(report.PersonImageFailed, example)
+	finalizeFailureReport(report)
+}
+
+func finalizeFailureReport(report *FailureReport) {
+	if report == nil || report.Counts == nil {
+		return
+	}
+	report.Truncated = report.Counts.Unmatched > len(report.Unmatched) ||
+		report.Counts.Ambiguous > len(report.Ambiguous) ||
+		report.Counts.Failed > len(report.Failed) ||
+		report.Counts.ImageFailed > len(report.ImageFailed) ||
+		report.Counts.PersonImageFailed > len(report.PersonImageFailed)
+	switch {
+	case report.Counts.Failed > 0 || report.Counts.ImageFailed > 0 || report.Counts.PersonImageFailed > 0:
+		report.Severity = "error"
+	case report.Counts.Unmatched > 0 || report.Counts.Ambiguous > 0:
+		report.Severity = "warning"
+	default:
+		report.Severity = ""
+	}
+}
+
+func failureCounts(report *FailureReport) *FailureCounts {
+	if report.Counts == nil {
+		report.Counts = &FailureCounts{}
+	}
+	return report.Counts
+}
+
+func appendLimitedFailure(values []FailureExample, value FailureExample) []FailureExample {
+	if len(values) >= 20 {
+		return values
+	}
+	return append(values, value)
+}
+
+func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Client, cache *importLookupCache, exportPath string, items []storage.ItemEntry, req ImportRequest, concurrency int, onResult func(ImportMatch)) ([]importItemResult, error) {
 	results := make([]importItemResult, len(items))
 	if len(items) == 0 {
 		return results, nil
@@ -1412,6 +2260,9 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 	go func() {
 		defer close(taskCh)
 		for idx, item := range items {
+			if err := j.WaitIfPaused(ctx); err != nil {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1431,6 +2282,9 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 			done++
 			results[result.Index] = result
 			match := result.Match
+			if onResult != nil {
+				onResult(match)
+			}
 			if match.Error != "" {
 				j.Log("warn", "%s：%s", match.SourceName, match.Error)
 			} else {
@@ -1458,7 +2312,7 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 	var reason string
 	err := retryWithTimeout(ctx, importRetryAttempts, importMatchTimeout, func(attemptCtx context.Context) error {
 		var attemptErr error
-		target, candidates, reason, attemptErr = findMatchWithCache(attemptCtx, client, cache, entry)
+		target, candidates, reason, attemptErr = findMatchWithCache(attemptCtx, client, cache, entry, importTargetLibraryIDs(req))
 		return attemptErr
 	})
 	if err != nil {
@@ -1791,13 +2645,27 @@ func setIfNotEmpty(raw map[string]any, key, value string) {
 	}
 }
 
-func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, manifest storage.Manifest, report *ImportReport, j *job.Job, dryRun bool, concurrency int) error {
+func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, cache *importLookupCache, checkpoint *importCheckpointStore, exportPath string, manifest storage.Manifest, report *ImportReport, j *job.Job, resume bool, dryRun bool, concurrency int) error {
 	tasks := make([]personImageTask, 0)
+	resumeDone := map[string]bool{}
+	if resume {
+		if existing, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), report.Target); ok {
+			for key, avatar := range existing.PersonAvatars {
+				if shouldResumePersonAvatarCheckpoint(avatar) {
+					resumeDone[key] = true
+				}
+			}
+		}
+	}
 	for _, person := range manifest.People {
 		if person.Image == nil || person.Name == "" {
 			continue
 		}
-		tasks = append(tasks, personImageTask{Name: person.Name, Path: person.Image.Path})
+		if resumeDone[person.StableKey] {
+			addSkippedWrites(report, "resume", 1)
+			continue
+		}
+		tasks = append(tasks, personImageTask{StableKey: person.StableKey, Name: person.Name, Path: person.Image.Path})
 	}
 	if dryRun {
 		if len(tasks) > 0 {
@@ -1825,6 +2693,9 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 	go func() {
 		defer close(taskCh)
 		for _, task := range tasks {
+			if err := j.WaitIfPaused(ctx); err != nil {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1845,6 +2716,7 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 			done++
 			if result.Err != nil {
 				report.Summary.PeopleImagesFailed++
+				addPersonImageFailureExample(&report.Failures, result.Name, result.Err)
 				detailedFailures++
 				if detailedFailures <= 10 {
 					j.Log("warn", "人物头像回写失败：%s - %v", result.Name, result.Err)
@@ -1853,6 +2725,11 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 				}
 			} else {
 				report.Summary.PeopleImages++
+				if checkpoint != nil {
+					if err := checkpoint.RecordPersonAvatar(result); err != nil {
+						j.Log("warn", "写入人物头像断点状态失败：%v", err)
+					}
+				}
 			}
 			if done == 1 || done%peopleImageProgressEvery == 0 || done == len(tasks) {
 				j.Log("info", "人物头像进度：%d/%d，成功 %d，失败 %d", done, len(tasks), report.Summary.PeopleImages, report.Summary.PeopleImagesFailed)
@@ -1870,33 +2747,37 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 func (s *Service) importPersonImage(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, task personImageTask) personImageResult {
 	imagePath, err := safePackagePath(exportPath, task.Path)
 	if err != nil {
-		return personImageResult{Name: task.Name, Err: fmt.Errorf("头像路径无效: %w", err)}
+		return personImageResult{StableKey: task.StableKey, Name: task.Name, Err: fmt.Errorf("头像路径无效: %w", err)}
 	}
 	data, err := os.ReadFile(imagePath)
 	if err != nil {
-		return personImageResult{Name: task.Name, Err: fmt.Errorf("读取头像失败: %w", err)}
+		return personImageResult{StableKey: task.StableKey, Name: task.Name, Err: fmt.Errorf("读取头像失败: %w", err)}
 	}
 	person, err := cache.findPersonByName(ctx, client, task.Name)
 	if err != nil {
-		return personImageResult{Name: task.Name, Err: err}
+		return personImageResult{StableKey: task.StableKey, Name: task.Name, Err: err}
 	}
 	personID := strings.TrimSpace(string(person.ID))
 	if personID == "" {
-		return personImageResult{Name: task.Name, Err: fmt.Errorf("target person %q has empty id", task.Name)}
+		return personImageResult{StableKey: task.StableKey, Name: task.Name, Err: fmt.Errorf("target person %q has empty id", task.Name)}
 	}
 	if err := retryWithTimeout(ctx, importRetryAttempts, personImageUploadTimeout, func(attemptCtx context.Context) error {
 		return client.UploadPersonImageByID(attemptCtx, personID, data)
 	}); err != nil {
-		return personImageResult{Name: task.Name, Err: err}
+		return personImageResult{StableKey: task.StableKey, Name: task.Name, TargetID: personID, Err: err}
 	}
-	return personImageResult{Name: task.Name}
+	return personImageResult{StableKey: task.StableKey, Name: task.Name, TargetID: personID}
 }
 
 func FindMatch(ctx context.Context, client *emby.Client, entry storage.ItemEntry) (emby.Item, []emby.Item, string, error) {
 	return findMatchWithCache(ctx, client, newImportLookupCache(), entry)
 }
 
-func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importLookupCache, entry storage.ItemEntry) (emby.Item, []emby.Item, string, error) {
+func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importLookupCache, entry storage.ItemEntry, libraryIDs ...[]string) (emby.Item, []emby.Item, string, error) {
+	targetLibraryIDs := []string(nil)
+	if len(libraryIDs) > 0 {
+		targetLibraryIDs = normalizeTargetLibraryIDs(libraryIDs[0])
+	}
 	var firstSearchErr error
 	var firstAmbiguous []emby.Item
 	var firstAmbiguousReason string
@@ -1912,7 +2793,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 		}
 	}
 	if stem := mediaPathStem(entry.Path); stem != "" {
-		items, err := cache.searchItems(ctx, client, searchPrefix(stem, 30), entry.Type, 50)
+		items, err := cache.searchItems(ctx, client, searchPrefix(stem, 30), entry.Type, 50, targetLibraryIDs)
 		if err == nil {
 			if entry.Type == "Season" {
 				matches := seasonMatches(entry, items)
@@ -1938,7 +2819,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 
 	providerValues := providerIDsForSearch(entry.ProviderIDs)
 	for _, value := range providerValues {
-		items, err := cache.itemsByProviderID(ctx, client, value)
+		items, err := cache.itemsByProviderID(ctx, client, value, targetLibraryIDs)
 		if err == nil && len(items) == 1 {
 			return items[0], items, "provider-id", nil
 		}
@@ -1950,7 +2831,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 		}
 	}
 	if entry.Type == "Episode" && entry.SeriesName != "" {
-		items, err := cache.searchItems(ctx, client, entry.SeriesName, "Episode", 300)
+		items, err := cache.searchItems(ctx, client, entry.SeriesName, "Episode", 300, targetLibraryIDs)
 		if err == nil {
 			matches := episodeMatches(entry, items)
 			if len(matches) == 1 {
@@ -1965,7 +2846,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 	}
 	if entry.Type == "Season" {
 		for _, term := range seasonSearchTerms(entry) {
-			items, err := cache.searchItems(ctx, client, term, "Season", 300)
+			items, err := cache.searchItems(ctx, client, term, "Season", 300, targetLibraryIDs)
 			if err != nil {
 				rememberSearchErr(err)
 				continue
@@ -1980,7 +2861,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 		}
 	}
 	if strings.TrimSpace(entry.Name) != "" {
-		items, err := cache.searchItems(ctx, client, entry.Name, entry.Type, 20)
+		items, err := cache.searchItems(ctx, client, entry.Name, entry.Type, 20, targetLibraryIDs)
 		if err == nil {
 			if entry.Type == "Episode" {
 				matches := episodeMatches(entry, items)
@@ -2007,7 +2888,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 	}
 	shortName := ShortName(entry.Name)
 	if shortName != "" && shortName != entry.Name {
-		items, err := cache.searchItems(ctx, client, shortName, entry.Type, 20)
+		items, err := cache.searchItems(ctx, client, shortName, entry.Type, 20, targetLibraryIDs)
 		if err == nil && len(items) > 0 {
 			exact := exactNameMatches(items, shortName, entry.Type)
 			if item, matches, ok := chooseUniqueMatch(exact, entry.ProductionYear); ok {
@@ -2022,7 +2903,7 @@ func findMatchWithCache(ctx context.Context, client *emby.Client, cache *importL
 		}
 	}
 	if entry.OriginalTitle != "" && entry.OriginalTitle != entry.Name {
-		items, err := cache.searchItems(ctx, client, entry.OriginalTitle, entry.Type, 20)
+		items, err := cache.searchItems(ctx, client, entry.OriginalTitle, entry.Type, 20, targetLibraryIDs)
 		if err == nil && len(items) > 0 {
 			exact := originalTitleMatches(items, entry.OriginalTitle, entry.Type)
 			if item, matches, ok := chooseUniqueMatch(exact, entry.ProductionYear); ok {

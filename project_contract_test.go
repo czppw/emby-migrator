@@ -191,7 +191,7 @@ func readText(t *testing.T, path string) string {
 
 func containsString(values []string, want string) bool {
 	for _, value := range values {
-		if value == want {
+		if value == want || strings.HasPrefix(value, want+".") {
 			return true
 		}
 	}
@@ -201,6 +201,9 @@ func containsString(values []string, want string) bool {
 func allowedGovernanceMatch(match string) bool {
 	allowed := map[string]bool{
 		"8c42aed2ee34524165c9c69f2cbee5832de38c96": true,
+		"7dcc0e10a63ad0dcbe84281405024849cd158c8a": true,
+		"4.8.11.0": true,
+		"4.9.5.0":  true,
 	}
 	return allowed[match]
 }

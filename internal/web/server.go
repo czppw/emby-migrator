@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"emby-migrator/internal/config"
@@ -15,15 +16,18 @@ import (
 )
 
 type Server struct {
-	cfg           config.Config
-	jobs          *job.Manager
-	exporter      *exporter.Service
-	sessionSecret []byte
+	cfg                   config.Config
+	jobs                  *job.Manager
+	exporter              *exporter.Service
+	sessionSecret         []byte
+	usersCache            cachedUsersConfig
+	telegramNotifications sync.Map
 }
 
 type connectionRequest struct {
-	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
+	BaseURL   string `json:"baseUrl"`
+	APIKey    string `json:"apiKey"`
+	ProfileID string `json:"profileId"`
 }
 
 type connectionResponse struct {
@@ -34,13 +38,16 @@ type connectionResponse struct {
 }
 
 type librariesRequest struct {
-	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
+	BaseURL   string `json:"baseUrl"`
+	APIKey    string `json:"apiKey"`
+	ProfileID string `json:"profileId"`
 }
 
 type exportRequest struct {
 	BaseURL             string         `json:"baseUrl"`
 	APIKey              string         `json:"apiKey"`
+	ProfileID           string         `json:"profileId"`
+	SourceProfileID     string         `json:"sourceProfileId"`
 	Libraries           []emby.Library `json:"libraries"`
 	LibraryIDs          []string       `json:"libraryIds"`
 	Concurrency         int            `json:"concurrency"`
@@ -54,12 +61,17 @@ type exportRequest struct {
 type importRequest struct {
 	BaseURL             string   `json:"baseUrl"`
 	APIKey              string   `json:"apiKey"`
+	ProfileID           string   `json:"profileId"`
+	TargetProfileID     string   `json:"targetProfileId"`
 	ExportPath          string   `json:"exportPath"`
+	TargetLibraryIDs    []string `json:"targetLibraryIds"`
+	LibraryIDs          []string `json:"libraryIds"`
 	Concurrency         int      `json:"concurrency"`
 	DryRun              bool     `json:"dryRun"`
 	SkipImages          bool     `json:"skipImages"`
 	IncludePeopleImages bool     `json:"includePeopleImages"`
 	Overwrite           bool     `json:"overwrite"`
+	Resume              bool     `json:"resume"`
 	ImageTypes          []string `json:"imageTypes"`
 }
 
@@ -73,18 +85,33 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
-	mux.Handle("POST /api/connection/test", s.requireAuth(http.HandlerFunc(s.handleConnectionTest)))
-	mux.Handle("POST /api/libraries", s.requireAuth(http.HandlerFunc(s.handleLibraries)))
-	mux.Handle("GET /api/exports", s.requireAuth(http.HandlerFunc(s.handleExports)))
-	mux.Handle("GET /api/import-reports", s.requireAuth(http.HandlerFunc(s.handleImportReports)))
-	mux.Handle("GET /api/import-reports/download", s.requireAuth(http.HandlerFunc(s.handleImportReportDownload)))
-	mux.Handle("POST /api/jobs/export", s.requireAuth(http.HandlerFunc(s.handleExportJob)))
-	mux.Handle("POST /api/jobs/import", s.requireAuth(http.HandlerFunc(s.handleImportJob)))
-	mux.Handle("POST /api/jobs/import/precheck", s.requireAuth(http.HandlerFunc(s.handleImportPrecheckJob)))
-	mux.Handle("GET /api/jobs/{id}", s.requireAuth(http.HandlerFunc(s.handleJob)))
-	mux.Handle("POST /api/jobs/{id}/stop", s.requireAuth(http.HandlerFunc(s.handleStopJob)))
-	mux.Handle("GET /api/jobs/{id}/logs", s.requireAuth(http.HandlerFunc(s.handleJobLogs)))
-	mux.Handle("GET /api/jobs/{id}/logs.txt", s.requireAuth(http.HandlerFunc(s.handleJobLogDownload)))
+	mux.Handle("POST /api/auth/password", s.requireAuth(http.HandlerFunc(s.handleAuthPasswordChange)))
+	mux.Handle("POST /api/connection/test", s.requireRole(roleOperator, http.HandlerFunc(s.handleConnectionTest)))
+	mux.Handle("POST /api/libraries", s.requireRole(roleOperator, http.HandlerFunc(s.handleLibraries)))
+	mux.Handle("GET /api/settings/app", s.requireRole(roleViewer, http.HandlerFunc(s.handleAppSettingsGet)))
+	mux.Handle("POST /api/settings/app", s.requireRole(roleAdmin, http.HandlerFunc(s.handleAppSettingsSave)))
+	mux.Handle("GET /api/settings/profiles", s.requireRole(roleViewer, http.HandlerFunc(s.handleAppProfilesList)))
+	mux.Handle("POST /api/settings/profiles", s.requireRole(roleAdmin, http.HandlerFunc(s.handleAppProfileSave)))
+	mux.Handle("DELETE /api/settings/profiles/{id}", s.requireRole(roleAdmin, http.HandlerFunc(s.handleAppProfileDelete)))
+	mux.Handle("POST /api/settings/profiles/select", s.requireRole(roleAdmin, http.HandlerFunc(s.handleAppProfileSelect)))
+	mux.Handle("GET /api/exports", s.requireRole(roleViewer, http.HandlerFunc(s.handleExports)))
+	mux.Handle("GET /api/import-reports", s.requireRole(roleViewer, http.HandlerFunc(s.handleImportReports)))
+	mux.Handle("GET /api/import-reports/download", s.requireRole(roleViewer, http.HandlerFunc(s.handleImportReportDownload)))
+	mux.Handle("GET /api/settings/telegram", s.requireRole(roleViewer, http.HandlerFunc(s.handleTelegramSettingsGet)))
+	mux.Handle("POST /api/settings/telegram", s.requireRole(roleAdmin, http.HandlerFunc(s.handleTelegramSettingsSave)))
+	mux.Handle("POST /api/settings/telegram/test", s.requireRole(roleAdmin, http.HandlerFunc(s.handleTelegramSettingsTest)))
+	mux.HandleFunc("GET /api/users", s.handleUsersNotFound)
+	mux.HandleFunc("POST /api/users", s.handleUsersNotFound)
+	mux.Handle("POST /api/jobs/export", s.requireRole(roleOperator, http.HandlerFunc(s.handleExportJob)))
+	mux.Handle("POST /api/jobs/import", s.requireRole(roleOperator, http.HandlerFunc(s.handleImportJob)))
+	mux.Handle("POST /api/jobs/import/precheck", s.requireRole(roleOperator, http.HandlerFunc(s.handleImportPrecheckJob)))
+	mux.Handle("GET /api/jobs", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobs)))
+	mux.Handle("GET /api/jobs/{id}", s.requireRole(roleViewer, http.HandlerFunc(s.handleJob)))
+	mux.Handle("POST /api/jobs/{id}/pause", s.requireRole(roleOperator, http.HandlerFunc(s.handlePauseJob)))
+	mux.Handle("POST /api/jobs/{id}/resume", s.requireRole(roleOperator, http.HandlerFunc(s.handleResumeJob)))
+	mux.Handle("POST /api/jobs/{id}/stop", s.requireRole(roleOperator, http.HandlerFunc(s.handleStopJob)))
+	mux.Handle("GET /api/jobs/{id}/logs", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobLogs)))
+	mux.Handle("GET /api/jobs/{id}/logs.txt", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobLogDownload)))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return recoverJSON(mux)
 }
@@ -102,7 +129,12 @@ func (s *Server) handleConnectionTest(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	client, err := emby.NewClient(req.BaseURL, req.APIKey)
+	connection, err := s.resolveEmbyConnection(req.BaseURL, req.APIKey, req.ProfileID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	client, err := emby.NewClient(connection.BaseURL, connection.APIKey)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -112,7 +144,7 @@ func (s *Server) handleConnectionTest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, connectionResponse{OK: true, Server: info, MaskedKey: emby.MaskAPIKey(req.APIKey), ToolVersion: s.cfg.Version})
+	writeJSON(w, http.StatusOK, connectionResponse{OK: true, Server: info, MaskedKey: emby.MaskAPIKey(connection.APIKey), ToolVersion: s.cfg.Version})
 }
 
 func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +152,12 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	client, err := emby.NewClient(req.BaseURL, req.APIKey)
+	connection, err := s.resolveEmbyConnection(req.BaseURL, req.APIKey, req.ProfileID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	client, err := emby.NewClient(connection.BaseURL, connection.APIKey)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -178,12 +215,16 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	j := s.jobs.Create("export")
-	go func() {
-		j.Start()
+	connection, err := s.resolveEmbyConnection(req.BaseURL, req.APIKey, coalesceProfileID(req.ProfileID, req.SourceProfileID))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	j := s.jobs.Enqueue("export", func(j *job.Job) {
+		defer s.notifyTelegramJobTerminal(j)
 		j.Log("info", "开始导出任务")
 		result, err := s.exporter.Export(j.Context(), j, exporter.ExportRequest{
-			Connection:          emby.Connection{BaseURL: req.BaseURL, APIKey: req.APIKey},
+			Connection:          connection,
 			Libraries:           req.Libraries,
 			LibraryIDs:          req.LibraryIDs,
 			Concurrency:         req.Concurrency,
@@ -206,7 +247,7 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		j.Complete(result)
-	}()
+	})
 	writeJSON(w, http.StatusAccepted, j.Snapshot())
 }
 
@@ -227,8 +268,17 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath is required"))
 		return
 	}
+	if _, _, err := s.exporter.ResolveExportPath(req.ExportPath); err != nil {
+		writeError(w, http.StatusBadRequest, friendlyExportPathError(req.ExportPath, err))
+		return
+	}
 	if forceDryRun {
 		req.DryRun = true
+	}
+	connection, err := s.resolveEmbyConnection(req.BaseURL, req.APIKey, coalesceProfileID(req.ProfileID, req.TargetProfileID))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
 	jobType := "import"
 	startMessage := "开始导入任务"
@@ -236,18 +286,20 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 		jobType = "import-precheck"
 		startMessage = "开始导入预检任务"
 	}
-	j := s.jobs.Create(jobType)
-	go func() {
-		j.Start()
+	j := s.jobs.Enqueue(jobType, func(j *job.Job) {
+		defer s.notifyTelegramJobTerminal(j)
 		j.Log("info", startMessage)
 		result, err := s.exporter.Import(j.Context(), j, exporter.ImportRequest{
-			Connection:          emby.Connection{BaseURL: req.BaseURL, APIKey: req.APIKey},
+			Connection:          connection,
 			ExportPath:          filepath.Clean(req.ExportPath),
+			TargetLibraryIDs:    req.TargetLibraryIDs,
+			LibraryIDs:          req.LibraryIDs,
 			Concurrency:         req.Concurrency,
 			DryRun:              req.DryRun,
 			SkipImages:          req.SkipImages,
 			IncludePeopleImages: req.IncludePeopleImages,
 			Overwrite:           req.Overwrite,
+			Resume:              req.Resume,
 			ImageTypes:          req.ImageTypes,
 			ToolVersion:         s.cfg.Version,
 		})
@@ -256,8 +308,20 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 			return
 		}
 		j.Complete(result)
-	}()
+	})
 	writeJSON(w, http.StatusAccepted, j.Snapshot())
+}
+
+func friendlyExportPathError(exportPath string, err error) error {
+	message := strings.TrimSpace(err.Error())
+	if strings.Contains(message, "export package not found") {
+		return fmt.Errorf("导出包不存在或已失效，请刷新导出包列表后重试：%s", strings.TrimSpace(exportPath))
+	}
+	return fmt.Errorf("导出包不可用：%s", message)
+}
+
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.jobs.List()})
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +334,34 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j.Snapshot())
 }
 
+func (s *Server) handlePauseJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		return
+	}
+	paused := j.Pause()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"paused": paused,
+		"job":    j.Snapshot(),
+	})
+}
+
+func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		return
+	}
+	resumed := j.Resume()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"resumed": resumed,
+		"job":     j.Snapshot(),
+	})
+}
+
 func (s *Server) handleStopJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	j, ok := s.jobs.Get(id)
@@ -278,6 +370,9 @@ func (s *Server) handleStopJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stopped := j.Stop()
+	if stopped {
+		s.notifyTelegramJobTerminal(j)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stopped": stopped,
 		"job":     j.Snapshot(),

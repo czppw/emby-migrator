@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -17,8 +18,10 @@ import (
 	"time"
 
 	"emby-migrator/internal/config"
+	"emby-migrator/internal/emby"
 	"emby-migrator/internal/exporter"
 	"emby-migrator/internal/job"
+	"emby-migrator/internal/storage"
 )
 
 func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
@@ -182,7 +185,8 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 				"imageTypes":          []string{"Logo"},
 			}, &importCreate, http.StatusAccepted)
 			importJob := waitForJob(t, client, app.URL, stringField(t, importCreate, "id"))
-			importSummary := objectField(t, objectField(t, objectField(t, importJob, "result"), "report"), "summary")
+			importReport := objectField(t, objectField(t, importJob, "result"), "report")
+			importSummary := objectField(t, importReport, "summary")
 			if intField(t, importSummary, "metadataUpdated") != 1 {
 				t.Fatalf("metadataUpdated summary = %#v, want 1", importSummary)
 			}
@@ -191,6 +195,21 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 			}
 			if intField(t, importSummary, "peopleImages") != 1 {
 				t.Fatalf("peopleImages summary = %#v, want 1", importSummary)
+			}
+			target := objectField(t, importReport, "target")
+			if stringField(t, target, "version") != tt.options.version {
+				t.Fatalf("import report target = %#v, want version %s", target, tt.options.version)
+			}
+			diff := objectField(t, importReport, "diff")
+			if stringField(t, diff, "mode") != "package-vs-run" {
+				t.Fatalf("diff mode = %#v, want package-vs-run", diff)
+			}
+			actual := objectField(t, diff, "actual")
+			if intField(t, actual, "metadataUpdated") != 1 {
+				t.Fatalf("diff actual = %#v, want metadataUpdated 1", actual)
+			}
+			if _, err := os.Stat(filepath.Join(exportPath, "import-checkpoint.json")); err != nil {
+				t.Fatalf("import checkpoint was not written: %v", err)
 			}
 
 			mockState.mu.Lock()
@@ -216,6 +235,98 @@ func TestAPISmokeExportImportWithMockEmby(t *testing.T) {
 				t.Fatalf("person image uploads = %#v, want %#v", got, want)
 			}
 		})
+	}
+}
+
+func TestImportJobPassesTargetLibraryIDsToExporter(t *testing.T) {
+	var parentIDs []string
+	mockEmby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Emby-Token") != "test-key" {
+			http.Error(w, "missing token", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeSmokeJSON(w, map[string]any{"ServerName": "Mock Target", "Version": "4.9.5.0", "Id": "target"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			parentIDs = append(parentIDs, r.URL.Query().Get("ParentId"))
+			if got := r.URL.Query().Get("AnyProviderIdEquals"); got != "Tmdb.123" {
+				http.Error(w, "unexpected provider id "+got, http.StatusBadRequest)
+				return
+			}
+			writeSmokeJSON(w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-movie", "Name": "Scoped Movie", "Type": "Movie", "ProviderIds": map[string]string{"Tmdb": "123"}},
+				},
+				"TotalRecordCount": 1,
+			})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer mockEmby.Close()
+
+	dataDir := t.TempDir()
+	exportDir := filepath.Join(dataDir, "exports", "pkg")
+	infoRel := filepath.ToSlash(filepath.Join("items", "scoped", "info.json"))
+	if err := os.MkdirAll(filepath.Join(exportDir, filepath.Dir(infoRel)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{Name: "Scoped Movie", Type: "Movie", ProviderIDs: map[string]string{"Tmdb": "123"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), storage.Manifest{
+		Items: []storage.ItemEntry{
+			{
+				StableKey:   "provider-tmdb-123",
+				Name:        "Scoped Movie",
+				Type:        "Movie",
+				ProviderIDs: map[string]string{"Tmdb": "123"},
+				InfoPath:    infoRel,
+			},
+		},
+		Summary: storage.Summary{Items: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := httptest.NewServer(NewServer(
+		config.Config{
+			DataDir:       dataDir,
+			Version:       "test",
+			AdminPassword: "pw",
+			SessionSecret: "test-session-secret",
+		},
+		job.NewManager(),
+		exporter.NewService(dataDir),
+	).Routes())
+	defer app.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := app.Client()
+	client.Jar = jar
+	postJSON(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, nil, http.StatusOK)
+
+	var create map[string]any
+	postJSON(t, client, app.URL+"/api/jobs/import/precheck", map[string]any{
+		"baseUrl":          mockEmby.URL,
+		"apiKey":           "test-key",
+		"exportPath":       "pkg",
+		"targetLibraryIds": []string{"target-lib"},
+	}, &create, http.StatusAccepted)
+	jobSnapshot := waitForJob(t, client, app.URL, stringField(t, create, "id"))
+	report := objectField(t, objectField(t, jobSnapshot, "result"), "report")
+	summary := objectField(t, report, "summary")
+	if intField(t, summary, "matched") != 1 {
+		t.Fatalf("precheck summary = %#v, want matched 1", summary)
+	}
+	if !reflect.DeepEqual(parentIDs, []string{"target-lib"}) {
+		t.Fatalf("target library ParentId = %#v, want target-lib", parentIDs)
 	}
 }
 
@@ -295,6 +406,45 @@ func TestImportPrecheckFailsWhenExportPackageIsIncomplete(t *testing.T) {
 	}
 	if got := mockState.writeCounts(); got != "updates=0 itemImages=0 peopleImages=0" {
 		t.Fatalf("failed precheck should not write to mock Emby: %s", got)
+	}
+}
+
+func TestImportPrecheckRejectsMissingExportPackageBeforeQueue(t *testing.T) {
+	dataDir := t.TempDir()
+	app := httptest.NewServer(NewServer(
+		config.Config{
+			DataDir:       dataDir,
+			Version:       "smoke-test",
+			AdminPassword: "pw",
+			SessionSecret: "test-session-secret",
+		},
+		job.NewManager(),
+		exporter.NewService(dataDir),
+	).Routes())
+	defer app.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := app.Client()
+	client.Jar = jar
+	postJSON(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, nil, http.StatusOK)
+
+	var response map[string]any
+	postJSON(t, client, app.URL+"/api/jobs/import/precheck", map[string]any{
+		"baseUrl":    "http://127.0.0.1:8096",
+		"apiKey":     "test-key",
+		"exportPath": "definitely-missing-export-package",
+	}, &response, http.StatusBadRequest)
+	if got := fmt.Sprint(response["error"]); !strings.Contains(got, "导出包不存在或已失效") {
+		t.Fatalf("missing export package error = %q", got)
+	}
+
+	var jobs map[string]any
+	getJSON(t, client, app.URL+"/api/jobs", &jobs, http.StatusOK)
+	if got, ok := jobs["jobs"].([]any); !ok || len(got) != 0 {
+		t.Fatalf("missing export package should not queue a job: %#v", jobs["jobs"])
 	}
 }
 
