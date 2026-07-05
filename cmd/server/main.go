@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -27,7 +28,13 @@ func main() {
 		log.Fatalf("create config dir: %v", err)
 	}
 
-	jobs := job.NewManager()
+	jobs := job.NewManagerWithOptions(job.ManagerOptions{
+		LogDir:                filepath.Join(cfg.DataDir, "logs"),
+		MaxMemoryLogEntries:   cfg.MaxMemoryLogEntries,
+		MaxCompletedJobs:      cfg.MaxCompletedJobs,
+		CompletedJobRetention: cfg.CompletedJobRetention,
+		ReleaseMemoryOnFinish: cfg.ReleaseMemoryOnFinish,
+	})
 	service := exporter.NewService(cfg.DataDir)
 	handler := web.NewServer(cfg, jobs, service)
 

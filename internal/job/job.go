@@ -3,6 +3,10 @@ package job
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -31,13 +35,16 @@ type Job struct {
 	Result    any       `json:"result,omitempty"`
 	Error     string    `json:"error,omitempty"`
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	logs   []LogEntry
-	subs   map[chan LogEntry]struct{}
-	paused bool
-	pause  chan struct{}
-	mu     sync.RWMutex
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	logs                []LogEntry
+	logFile             *os.File
+	logPath             string
+	subs                map[chan LogEntry]struct{}
+	paused              bool
+	pause               chan struct{}
+	maxMemoryLogEntries int
+	mu                  sync.RWMutex
 }
 
 type LogEntry struct {
@@ -47,10 +54,25 @@ type LogEntry struct {
 }
 
 type Manager struct {
-	mu   sync.RWMutex
-	jobs map[string]*Job
-	work chan queuedWork
+	mu      sync.RWMutex
+	jobs    map[string]*Job
+	work    chan queuedWork
+	options ManagerOptions
 }
+
+type ManagerOptions struct {
+	LogDir                string
+	MaxMemoryLogEntries   int
+	MaxCompletedJobs      int
+	CompletedJobRetention time.Duration
+	ReleaseMemoryOnFinish bool
+}
+
+const (
+	DefaultMaxMemoryLogEntries   = 2000
+	DefaultMaxCompletedJobs      = 20
+	DefaultCompletedJobRetention = 24 * time.Hour
+)
 
 type queuedWork struct {
 	job *Job
@@ -58,9 +80,15 @@ type queuedWork struct {
 }
 
 func NewManager() *Manager {
+	return NewManagerWithOptions(ManagerOptions{})
+}
+
+func NewManagerWithOptions(options ManagerOptions) *Manager {
+	options = normalizeManagerOptions(options)
 	m := &Manager{
-		jobs: map[string]*Job{},
-		work: make(chan queuedWork, 128),
+		jobs:    map[string]*Job{},
+		work:    make(chan queuedWork, 128),
+		options: options,
 	}
 	go m.runQueue()
 	return m
@@ -79,17 +107,21 @@ func (m *Manager) Create(jobType string) *Job {
 		id = fmt.Sprintf("%d", now.UnixNano())
 	}
 	j := &Job{
-		ID:        id,
-		Type:      jobType,
-		Status:    StatusQueued,
-		CreatedAt: now,
-		UpdatedAt: now,
-		ctx:       ctx,
-		cancel:    cancel,
-		subs:      map[chan LogEntry]struct{}{},
+		ID:                  id,
+		Type:                jobType,
+		Status:              StatusQueued,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		ctx:                 ctx,
+		cancel:              cancel,
+		subs:                map[chan LogEntry]struct{}{},
+		maxMemoryLogEntries: m.options.MaxMemoryLogEntries,
 	}
 	m.jobs[j.ID] = j
 	m.mu.Unlock()
+	if m.options.LogDir != "" {
+		j.initLogFile(m.options.LogDir)
+	}
 	return j
 }
 
@@ -100,6 +132,7 @@ func (m *Manager) Enqueue(jobType string, run func(*Job)) *Job {
 }
 
 func (m *Manager) Get(id string) (*Job, bool) {
+	m.pruneCompleted()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	j, ok := m.jobs[id]
@@ -107,6 +140,7 @@ func (m *Manager) Get(id string) (*Job, bool) {
 }
 
 func (m *Manager) List() []Job {
+	m.pruneCompleted()
 	m.mu.RLock()
 	jobs := make([]*Job, 0, len(m.jobs))
 	for _, j := range m.jobs {
@@ -130,6 +164,7 @@ func (m *Manager) runQueue() {
 			continue
 		}
 		work.run(work.job)
+		m.afterWork()
 	}
 }
 
@@ -163,7 +198,9 @@ func (j *Job) Complete(result any) {
 	j.UpdatedAt = now
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "info", Message: "任务完成"})
+	j.trimMemoryLogsLocked()
 	j.closeSubsLocked()
+	j.closeLogLocked()
 }
 
 func (j *Job) Fail(err error) {
@@ -179,7 +216,9 @@ func (j *Job) Fail(err error) {
 	j.UpdatedAt = now
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "error", Message: err.Error()})
+	j.trimMemoryLogsLocked()
 	j.closeSubsLocked()
+	j.closeLogLocked()
 }
 
 func (j *Job) FailWithResult(err error, result any) {
@@ -196,7 +235,9 @@ func (j *Job) FailWithResult(err error, result any) {
 	j.UpdatedAt = now
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "error", Message: err.Error()})
+	j.trimMemoryLogsLocked()
 	j.closeSubsLocked()
+	j.closeLogLocked()
 }
 
 func (j *Job) Stop() bool {
@@ -212,7 +253,9 @@ func (j *Job) Stop() bool {
 	j.UpdatedAt = now
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "warn", Message: "任务已停止"})
+	j.trimMemoryLogsLocked()
 	j.closeSubsLocked()
+	j.closeLogLocked()
 	return true
 }
 
@@ -301,9 +344,21 @@ func (j *Job) Logs() []LogEntry {
 	return out
 }
 
+func (j *Job) LogPath() (string, bool) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if j.logPath == "" {
+		return "", false
+	}
+	if _, err := os.Stat(j.logPath); err != nil {
+		return "", false
+	}
+	return j.logPath, true
+}
+
 func (j *Job) Subscribe() (<-chan LogEntry, func()) {
-	ch := make(chan LogEntry, 100)
 	j.mu.Lock()
+	ch := make(chan LogEntry, len(j.logs)+100)
 	for _, entry := range j.logs {
 		ch <- entry
 	}
@@ -342,6 +397,12 @@ func (j *Job) resumeLocked() {
 
 func (j *Job) publishLocked(entry LogEntry) {
 	j.logs = append(j.logs, entry)
+	if j.shouldTrimMemoryLogsLocked() {
+		j.trimMemoryLogsLocked()
+	}
+	if j.logFile != nil {
+		_, _ = j.logFile.WriteString(formatLogEntry(entry))
+	}
 	for ch := range j.subs {
 		select {
 		case ch <- entry:
@@ -350,9 +411,121 @@ func (j *Job) publishLocked(entry LogEntry) {
 	}
 }
 
+func (j *Job) shouldTrimMemoryLogsLocked() bool {
+	if j.maxMemoryLogEntries <= 0 || len(j.logs) <= j.maxMemoryLogEntries {
+		return false
+	}
+	return len(j.logs) >= j.maxMemoryLogEntries*2 || len(j.logs)-j.maxMemoryLogEntries >= 100
+}
+
+func (j *Job) trimMemoryLogsLocked() {
+	if j.maxMemoryLogEntries <= 0 || len(j.logs) <= j.maxMemoryLogEntries {
+		return
+	}
+	trimmed := make([]LogEntry, j.maxMemoryLogEntries)
+	copy(trimmed, j.logs[len(j.logs)-j.maxMemoryLogEntries:])
+	j.logs = trimmed
+}
+
 func (j *Job) closeSubsLocked() {
 	for ch := range j.subs {
 		close(ch)
 		delete(j.subs, ch)
+	}
+}
+
+func (j *Job) initLogFile(logDir string) {
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return
+	}
+	path := filepath.Join(logDir, fmt.Sprintf("emby-migrator-job-%s.log", j.ID))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	j.mu.Lock()
+	j.logPath = path
+	j.logFile = file
+	j.mu.Unlock()
+}
+
+func (j *Job) closeLogLocked() {
+	if j.logFile == nil {
+		return
+	}
+	_ = j.logFile.Close()
+	j.logFile = nil
+}
+
+func formatLogEntry(entry LogEntry) string {
+	return fmt.Sprintf("%s 北京时间 [%s] %s\n", beijingTime(entry.Time).Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
+}
+
+func beijingTime(value time.Time) time.Time {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return value.Local()
+	}
+	return value.In(location)
+}
+
+func normalizeManagerOptions(options ManagerOptions) ManagerOptions {
+	if options.MaxMemoryLogEntries <= 0 {
+		options.MaxMemoryLogEntries = DefaultMaxMemoryLogEntries
+	}
+	if options.MaxCompletedJobs < 0 {
+		options.MaxCompletedJobs = 0
+	}
+	if options.MaxCompletedJobs == 0 {
+		options.MaxCompletedJobs = DefaultMaxCompletedJobs
+	}
+	if options.CompletedJobRetention < 0 {
+		options.CompletedJobRetention = 0
+	}
+	if options.CompletedJobRetention == 0 {
+		options.CompletedJobRetention = DefaultCompletedJobRetention
+	}
+	return options
+}
+
+func (m *Manager) afterWork() {
+	m.pruneCompleted()
+	if !m.options.ReleaseMemoryOnFinish {
+		return
+	}
+	runtime.GC()
+	debug.FreeOSMemory()
+}
+
+func (m *Manager) pruneCompleted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pruneCompletedLocked(time.Now())
+}
+
+func (m *Manager) pruneCompletedLocked(now time.Time) {
+	if len(m.jobs) == 0 {
+		return
+	}
+	completed := make([]*Job, 0, len(m.jobs))
+	for _, j := range m.jobs {
+		snapshot := j.Snapshot()
+		if !isTerminalStatus(snapshot.Status) {
+			continue
+		}
+		if m.options.CompletedJobRetention > 0 && !snapshot.EndedAt.IsZero() && now.Sub(snapshot.EndedAt) > m.options.CompletedJobRetention {
+			delete(m.jobs, snapshot.ID)
+			continue
+		}
+		completed = append(completed, j)
+	}
+	if m.options.MaxCompletedJobs <= 0 || len(completed) <= m.options.MaxCompletedJobs {
+		return
+	}
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].Snapshot().EndedAt.After(completed[j].Snapshot().EndedAt)
+	})
+	for _, j := range completed[m.options.MaxCompletedJobs:] {
+		delete(m.jobs, j.ID)
 	}
 }

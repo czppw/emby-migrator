@@ -13,8 +13,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 	app := readFrontendFile(t, "assets", "app.js")
 
 	for _, marker := range []string{
-		`./assets/styles.css?v=0.1.0-beta.3`,
-		`./assets/app.js?v=0.1.0-beta.3`,
+		`./assets/styles.css?v=0.1.0-beta.4`,
+		`./assets/app.js?v=0.1.0-beta.4`,
 		"服务器地址簿",
 		"保存服务器",
 		"导出图片类型",

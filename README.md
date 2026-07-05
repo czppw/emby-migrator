@@ -64,6 +64,21 @@ curl http://服务器IP:8787/api/health
 
 镜像默认以容器 root 用户运行，方便直接写入宿主机挂载目录。如果自行指定 `--user`，需要确保该用户对宿主机数据目录有写权限；如果宿主机挂载目录不可写，导出时会出现 `mkdir /data/exports: permission denied`。
 
+## 运行内存与日志保留
+
+任务完成后，程序只在内存里保留任务摘要、最近日志和最近任务记录；完整导出包、导入报告和任务日志仍写在 `/data` 下。默认完整任务日志位于 `/data/logs`，网页端下载日志会优先读取这里的文件。
+
+可选环境变量：
+
+```bash
+-e EMBY_MIGRATOR_MAX_MEMORY_LOGS=2000 \
+-e EMBY_MIGRATOR_MAX_COMPLETED_JOBS=20 \
+-e EMBY_MIGRATOR_JOB_RETENTION_HOURS=24 \
+-e EMBY_MIGRATOR_RELEASE_MEMORY_ON_FINISH=true
+```
+
+大库长期运行时，建议保持默认值；如果宿主机内存很紧，可以把 `EMBY_MIGRATOR_MAX_MEMORY_LOGS` 调低到 `500` 或 `1000`。如果连续跑很多短任务且不希望每个任务后主动归还内存，可以设置 `EMBY_MIGRATOR_RELEASE_MEMORY_ON_FINISH=false`。
+
 ## Docker Compose
 
 ```yaml

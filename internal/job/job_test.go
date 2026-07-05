@@ -2,6 +2,9 @@ package job
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,6 +134,86 @@ func TestPauseResumeUnblocksWaiters(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("WaitIfPaused did not return after resume")
+	}
+}
+
+func TestJobKeepsOnlyRecentLogsInMemoryAndWritesFullLogFile(t *testing.T) {
+	m := NewManagerWithOptions(ManagerOptions{
+		LogDir:              t.TempDir(),
+		MaxMemoryLogEntries: 3,
+		MaxCompletedJobs:    20,
+	})
+	j := m.Create("export")
+	j.Start()
+	for i := 0; i < 5; i++ {
+		j.Log("info", "line %d", i)
+	}
+	j.Complete(nil)
+
+	logs := j.Logs()
+	if len(logs) != 3 {
+		t.Fatalf("memory logs length = %d, want 3", len(logs))
+	}
+	if logs[0].Message != "line 3" || logs[1].Message != "line 4" {
+		t.Fatalf("memory logs kept wrong tail: %#v", logs)
+	}
+
+	logPath, ok := j.LogPath()
+	if !ok {
+		t.Fatalf("expected disk log path")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for i := 0; i < 5; i++ {
+		if !strings.Contains(text, fmt.Sprintf("line %d", i)) {
+			t.Fatalf("disk log missing line %d:\n%s", i, text)
+		}
+	}
+	if !strings.Contains(text, "任务完成") {
+		t.Fatalf("disk log missing terminal line:\n%s", text)
+	}
+}
+
+func TestManagerPrunesOldCompletedJobs(t *testing.T) {
+	m := NewManagerWithOptions(ManagerOptions{
+		MaxCompletedJobs:      2,
+		CompletedJobRetention: 10 * time.Hour,
+	})
+	first := m.Create("export")
+	first.Start()
+	first.Complete("first")
+	second := m.Create("export")
+	second.Start()
+	second.Complete("second")
+	third := m.Create("export")
+	third.Start()
+	third.Complete("third")
+	now := time.Now()
+	first.mu.Lock()
+	first.EndedAt = now.Add(-3 * time.Hour)
+	first.mu.Unlock()
+	second.mu.Lock()
+	second.EndedAt = now.Add(-2 * time.Hour)
+	second.mu.Unlock()
+	third.mu.Lock()
+	third.EndedAt = now.Add(-time.Hour)
+	third.mu.Unlock()
+
+	list := m.List()
+	if len(list) != 2 {
+		t.Fatalf("job list length = %d, want 2", len(list))
+	}
+	if _, ok := m.Get(first.ID); ok {
+		t.Fatalf("oldest completed job should have been pruned")
+	}
+	if _, ok := m.Get(second.ID); !ok {
+		t.Fatalf("second completed job should be retained")
+	}
+	if _, ok := m.Get(third.ID); !ok {
+		t.Fatalf("newest completed job should be retained")
 	}
 }
 

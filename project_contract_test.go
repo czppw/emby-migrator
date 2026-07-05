@@ -200,8 +200,10 @@ func containsString(values []string, want string) bool {
 
 func allowedGovernanceMatch(match string) bool {
 	allowed := map[string]bool{
-		"8c42aed2ee34524165c9c69f2cbee5832de38c96": true,
-		"7dcc0e10a63ad0dcbe84281405024849cd158c8a": true,
+		"8c42aed2ee34524165c9c69f2cbee5832de38c96":                         true,
+		"7dcc0e10a63ad0dcbe84281405024849cd158c8a":                         true,
+		"97ba9d88cd6096c7b67cf6096652da92b567a362":                         true,
+		"a7b8c19bc8f1a47dc1d21af94bf356afc2ac2231018a0eea03308ee9b9c30d55": true,
 		"4.8.11.0": true,
 		"4.9.5.0":  true,
 	}

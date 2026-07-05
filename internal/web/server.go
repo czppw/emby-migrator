@@ -242,11 +242,11 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 		if len(result.Manifest.Errors) > 0 {
 			j.FailWithResult(
 				fmt.Errorf("导出未完全成功：%d 个错误，导出包已保留：%s", len(result.Manifest.Errors), result.Path),
-				result,
+				compactJobResult(result),
 			)
 			return
 		}
-		j.Complete(result)
+		j.Complete(compactJobResult(result))
 	})
 	writeJSON(w, http.StatusAccepted, j.Snapshot())
 }
@@ -307,7 +307,7 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 			j.Fail(err)
 			return
 		}
-		j.Complete(result)
+		j.Complete(compactJobResult(result))
 	})
 	writeJSON(w, http.StatusAccepted, j.Snapshot())
 }
@@ -424,6 +424,10 @@ func (s *Server) handleJobLogDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"emby-migrator-job-%s.log\"", id))
+	if logPath, ok := j.LogPath(); ok {
+		http.ServeFile(w, r, logPath)
+		return
+	}
 	for _, entry := range j.Logs() {
 		fmt.Fprintf(w, "%s 北京时间 [%s] %s\n", beijingTime(entry.Time).Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
 	}
