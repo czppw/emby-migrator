@@ -55,6 +55,14 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=Emby Migrator
+            org.opencontainers.image.description=Lightweight Docker Web tool for exporting and importing Emby metadata and artwork
+            org.opencontainers.image.source=https://github.com/czppw/emby-migrator
+            org.opencontainers.image.url=https://github.com/czppw/emby-migrator
+            org.opencontainers.image.documentation=https://github.com/czppw/emby-migrator#readme
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.authors=czppw / czppwa
 
       - name: Build and push
         if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
