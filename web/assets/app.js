@@ -414,6 +414,7 @@
 
   function applyAuthState(warning) {
     const locked = state.authEnabled && !state.authenticated;
+    document.body.classList.toggle("auth-page-active", locked);
     els.authGate.classList.toggle("is-hidden", !locked);
     els.appShell.classList.toggle("is-locked", locked);
     els.logoutBtn.classList.toggle("is-hidden", !state.authEnabled || locked);
@@ -426,6 +427,7 @@
     els.authWarning.textContent = warning || "";
     if (locked) {
       setNotice(els.authNotice, "请输入访问密码。");
+      window.requestAnimationFrame(() => els.authPassword?.focus());
     }
   }
 

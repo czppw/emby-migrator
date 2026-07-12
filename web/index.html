@@ -4,36 +4,83 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Emby Migrator</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=0.1.0-beta.6" />
-    <script src="./assets/app.js?v=0.1.0-beta.6" defer></script>
+    <link rel="stylesheet" href="./assets/styles.css?v=1.0.0" />
+    <script src="./assets/app.js?v=1.0.0" defer></script>
   </head>
   <body>
     <section class="auth-gate is-hidden" id="authGate" aria-labelledby="authTitle">
-      <form class="auth-card" id="authForm">
-        <p class="eyebrow">受保护访问</p>
-        <h2 id="authTitle">登录 Emby Migrator</h2>
-        <label class="field">
-          <span>访问密码</span>
-          <input
-            id="authPassword"
-            name="authPassword"
-            type="password"
-            autocomplete="current-password"
-            placeholder="默认 password"
-            required
-          />
-        </label>
-        <button type="submit" class="button primary" id="authLoginBtn">登录</button>
-        <div class="notice" id="authNotice" role="status" aria-live="polite"></div>
-      </form>
+      <div class="auth-page-shell">
+        <aside class="auth-hero" aria-label="产品说明">
+          <div class="auth-visual" aria-hidden="true">
+            <div class="auth-visual-head">
+              <span>Migration Flow</span>
+              <strong>Emby → Package → Emby</strong>
+            </div>
+            <div class="auth-route">
+              <span>源库</span>
+              <i></i>
+              <span>导出包</span>
+              <i></i>
+              <span>目标库</span>
+            </div>
+            <div class="auth-visual-grid">
+              <span>metadata</span>
+              <span>poster</span>
+              <span>people</span>
+              <span>report</span>
+            </div>
+          </div>
+          <p class="eyebrow">Emby Migrator Console</p>
+          <h1>Emby 数据迁移控制台</h1>
+          <p class="auth-hero-copy">
+            把元数据、海报、人物头像与报告打包迁移。换设备、换库、重建媒体库时，少刮削、少返工。
+          </p>
+          <div class="auth-feature-grid">
+            <div>
+              <strong>Metadata</strong>
+              <span>按媒体名称匹配，适配新旧 Emby 内部 ID 变化。</span>
+            </div>
+            <div>
+              <strong>Artwork</strong>
+              <span>海报、背景图、Logo、人物头像统一备份回写。</span>
+            </div>
+            <div>
+              <strong>Reports</strong>
+              <span>任务总结、失败报告、差异信息与日志可追踪。</span>
+            </div>
+          </div>
+        </aside>
+
+        <form class="auth-card" id="authForm">
+          <div class="auth-card-header">
+            <p class="eyebrow">受保护访问</p>
+            <h2 id="authTitle">登录控制台</h2>
+            <p>请输入访问密码进入 Emby Migrator。</p>
+          </div>
+          <label class="field">
+            <span>访问密码</span>
+            <input
+              id="authPassword"
+              name="authPassword"
+              type="password"
+              autocomplete="current-password"
+              placeholder="默认 password"
+              required
+            />
+          </label>
+          <button type="submit" class="button primary auth-submit" id="authLoginBtn">登录</button>
+          <div class="notice" id="authNotice" role="status" aria-live="polite"></div>
+          <p class="auth-footnote">默认密码为 password，进入后可在安全设置中修改。</p>
+        </form>
+      </div>
     </section>
     <div class="app-shell" id="appShell">
       <header class="app-header">
         <div>
-          <p class="eyebrow">Docker 网页工具</p>
+          <p class="eyebrow">Emby 元数据迁移工具</p>
           <div class="brand-row">
             <h1>Emby Migrator</h1>
-            <span class="version-badge" id="appVersion">v0.1.0-beta.6</span>
+            <span class="version-badge" id="appVersion">v1.0.0</span>
           </div>
         </div>
         <div class="header-actions">
