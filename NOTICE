@@ -1,0 +1,18 @@
+﻿Emby Migrator
+
+Copyright (c) 2026 czppw / czppwa
+
+Original project:
+https://github.com/czppw/emby-migrator
+
+Official Docker image:
+https://hub.docker.com/r/czppwa/emby-migrator
+
+License:
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)
+
+This project is distributed with the expectation that forks, modified
+versions, redistributed copies, and network-accessible deployments preserve
+this notice, the copyright statement, and the license terms. Modified versions
+should clearly identify that they are derived from Emby Migrator and provide
+the corresponding source code as required by the AGPL.

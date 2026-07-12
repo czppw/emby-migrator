@@ -13,8 +13,11 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 	app := readFrontendFile(t, "assets", "app.js")
 
 	for _, marker := range []string{
-		`./assets/styles.css?v=0.1.0-beta.4`,
-		`./assets/app.js?v=0.1.0-beta.4`,
+		`./assets/styles.css?v=0.1.0-beta.5`,
+		`./assets/app.js?v=0.1.0-beta.5`,
+		"https://github.com/czppw/emby-migrator",
+		"https://hub.docker.com/r/czppwa/emby-migrator",
+		"License: AGPL-3.0-or-later",
 		"服务器地址簿",
 		"保存服务器",
 		"导出图片类型",
@@ -49,6 +52,7 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		"grid-template-columns: minmax(0, 1.7fr) minmax(132px, 0.7fr);",
 		"grid-template-columns: repeat(auto-fit, minmax(min(100%, 118px), 1fr));",
 		"overflow: visible;",
+		".app-footer",
 	} {
 		if !strings.Contains(styles, marker) {
 			t.Fatalf("styles.css missing layout guard marker %q", marker)

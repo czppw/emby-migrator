@@ -9,9 +9,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/emby-mi
 
 FROM alpine:3.20
 
+LABEL org.opencontainers.image.title="Emby Migrator" \
+      org.opencontainers.image.description="Lightweight Docker Web tool for exporting and importing Emby metadata and artwork" \
+      org.opencontainers.image.source="https://github.com/czppw/emby-migrator" \
+      org.opencontainers.image.url="https://github.com/czppw/emby-migrator" \
+      org.opencontainers.image.documentation="https://github.com/czppw/emby-migrator#readme" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.authors="czppw / czppwa"
+
 WORKDIR /app
 COPY --from=build /out/emby-migrator /app/emby-migrator
 COPY web /app/web
+COPY LICENSE NOTICE /app/
 RUN mkdir -p /data /config
 
 ENV EMBY_MIGRATOR_ADDR=:8787 \

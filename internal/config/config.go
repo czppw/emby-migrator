@@ -25,7 +25,7 @@ func FromEnv() Config {
 		ListenAddr:            env("EMBY_MIGRATOR_ADDR", ":8787"),
 		DataDir:               env("EMBY_MIGRATOR_DATA", "/data"),
 		ConfigDir:             env("EMBY_MIGRATOR_CONFIG", "/config"),
-		Version:               env("EMBY_MIGRATOR_VERSION", "0.1.0-beta.4"),
+		Version:               env("EMBY_MIGRATOR_VERSION", "0.1.0-beta.5"),
 		AdminPassword:         env("EMBY_MIGRATOR_PASSWORD", "password"),
 		SessionSecret:         os.Getenv("EMBY_MIGRATOR_SESSION_SECRET"),
 		MaxMemoryLogEntries:   envInt("EMBY_MIGRATOR_MAX_MEMORY_LOGS", 2000),

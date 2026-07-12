@@ -193,6 +193,32 @@ h1 {
   white-space: nowrap;
 }
 
+.app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--border), transparent 30%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface), transparent 22%);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.app-footer a {
+  color: var(--accent-strong);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.app-footer a:hover {
+  text-decoration: underline;
+}
+
 h2 {
   margin-bottom: 4px;
   font-size: 18px;
