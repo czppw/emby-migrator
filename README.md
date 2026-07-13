@@ -52,16 +52,9 @@
 
 ## 工作流程
 
-```mermaid
-flowchart LR
-  A[旧 Emby 服务器] --> B[选择媒体库]
-  B --> C[导出元数据与图片]
-  C --> D[导出包 /data/exports]
-  D --> E[选择目标 Emby 服务器]
-  E --> F[预检匹配]
-  F --> G[导入元数据、图片、人物头像]
-  G --> H[导入报告与任务日志]
-```
+<p align="center">
+  <img src="docs/assets/readme-workflow.svg" alt="Emby Migrator 工作流程" width="100%" />
+</p>
 
 不同 Emby 实例的内部 ID 通常不同，所以项目不会把旧 Emby 的内部 ID 当作跨服务器匹配依据。导入时会根据导出包里的媒体信息，在目标 Emby 中重新搜索并匹配对应媒体。
 
