@@ -63,6 +63,6 @@
   </g>
   <g font-family="Segoe UI, Microsoft YaHei, Arial, sans-serif">
     <text x="42" y="42" fill="#0F172A" font-size="18" font-weight="850">工作流程</text>
-    <text x="132" y="42" fill="#64748B" font-size="13">静态流程图，不依赖 Mermaid 缩放控件</text>
+    <text x="132" y="42" fill="#64748B" font-size="13">导出、预检、导入、报告一次完成</text>
   </g>
 </svg>
