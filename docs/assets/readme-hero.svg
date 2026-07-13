@@ -1,0 +1,80 @@
+<svg width="1280" height="420" viewBox="0 0 1280 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Emby Migrator 项目横幅</title>
+  <desc id="desc">Emby 元数据、海报和人物头像迁移工具的 GitHub README 横幅。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111F"/>
+      <stop offset="0.52" stop-color="#111A2B"/>
+      <stop offset="1" stop-color="#1F335A"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="145" y1="72" x2="1085" y2="334" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EA8FF"/>
+      <stop offset="0.48" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#2DD4BF"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.06"/>
+    </linearGradient>
+    <filter id="shadow" x="-60" y="-60" width="1400" height="540" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="32" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <filter id="glow" x="-80" y="-80" width="300" height="300" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="36" result="blur"/>
+      <feBlend in="SourceGraphic" in2="blur" mode="screen"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="420" rx="34" fill="url(#bg)"/>
+  <circle cx="1028" cy="42" r="210" fill="#315CF6" opacity="0.22" filter="url(#glow)"/>
+  <circle cx="157" cy="349" r="166" fill="#2DD4BF" opacity="0.12" filter="url(#glow)"/>
+  <path d="M72 66C72 51.64 83.64 40 98 40H1182C1196.36 40 1208 51.64 1208 66V354C1208 368.36 1196.36 380 1182 380H98C83.64 380 72 368.36 72 354V66Z" stroke="white" stroke-opacity="0.12"/>
+
+  <g filter="url(#shadow)">
+    <rect x="682" y="94" width="454" height="232" rx="24" fill="url(#card)" stroke="white" stroke-opacity="0.14"/>
+    <rect x="712" y="124" width="394" height="44" rx="14" fill="white" fill-opacity="0.08" stroke="white" stroke-opacity="0.12"/>
+    <circle cx="735" cy="146" r="7" fill="#58C483"/>
+    <circle cx="759" cy="146" r="7" fill="#F6C453"/>
+    <circle cx="783" cy="146" r="7" fill="#FF8A80"/>
+    <text x="814" y="153" fill="#E8F1FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="15" font-weight="700">Migration Console</text>
+
+    <g transform="translate(724 205)">
+      <rect x="0" y="0" width="92" height="58" rx="16" fill="#315CF6" fill-opacity="0.34" stroke="#8DB4FF" stroke-opacity="0.45"/>
+      <text x="46" y="35" text-anchor="middle" fill="white" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="16" font-weight="800">旧库</text>
+      <path d="M108 30H168" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+      <path d="M160 21L170 30L160 39" stroke="#7DD3FC" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="184" y="0" width="112" height="58" rx="16" fill="#FFFFFF" fill-opacity="0.1" stroke="#FFFFFF" stroke-opacity="0.16"/>
+      <text x="240" y="25" text-anchor="middle" fill="white" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="14" font-weight="800">导出包</text>
+      <text x="240" y="43" text-anchor="middle" fill="#B9C8E6" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="11">metadata · artwork</text>
+      <path d="M312 30H372" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+      <path d="M364 21L374 30L364 39" stroke="#5EEAD4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="388" y="0" width="92" height="58" rx="16" fill="#14B8A6" fill-opacity="0.26" stroke="#5EEAD4" stroke-opacity="0.5"/>
+      <text x="434" y="35" text-anchor="middle" fill="white" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="16" font-weight="800">新库</text>
+    </g>
+
+    <g transform="translate(724 285)">
+      <rect width="86" height="28" rx="14" fill="white" fill-opacity="0.08"/>
+      <text x="43" y="19" text-anchor="middle" fill="#CFE0FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="12" font-weight="700">海报</text>
+      <rect x="96" width="86" height="28" rx="14" fill="white" fill-opacity="0.08"/>
+      <text x="139" y="19" text-anchor="middle" fill="#CFE0FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="12" font-weight="700">人物头像</text>
+      <rect x="192" width="86" height="28" rx="14" fill="white" fill-opacity="0.08"/>
+      <text x="235" y="19" text-anchor="middle" fill="#CFE0FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="12" font-weight="700">报告</text>
+      <rect x="288" width="112" height="28" rx="14" fill="white" fill-opacity="0.08"/>
+      <text x="344" y="19" text-anchor="middle" fill="#CFE0FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="12" font-weight="700">Telegram 通知</text>
+    </g>
+  </g>
+
+  <text x="120" y="116" fill="#9DB7E8" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="15" font-weight="800" letter-spacing="3">EMBY MIGRATOR</text>
+  <text x="120" y="178" fill="white" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="58" font-weight="850" letter-spacing="-2">Emby 元数据迁移工具</text>
+  <text x="120" y="226" fill="#D8E6FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="24" font-weight="650">备份元数据、海报、人物头像，迁移媒体库无需重复刮削。</text>
+  <text x="120" y="276" fill="#9FB0CF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="17">Docker 部署 · 单用户密码入口 · 多服务器地址簿 · 实时日志 · 任务报告 · TG 通知</text>
+
+  <g transform="translate(120 316)">
+    <rect width="118" height="34" rx="17" fill="#315CF6" fill-opacity="0.28" stroke="#82A9FF" stroke-opacity="0.35"/>
+    <text x="59" y="23" text-anchor="middle" fill="#EAF1FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="13" font-weight="800">v1.0.0</text>
+    <rect x="132" width="146" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="205" y="23" text-anchor="middle" fill="#EAF1FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="13" font-weight="800">AGPL-3.0-or-later</text>
+    <rect x="292" width="124" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="354" y="23" text-anchor="middle" fill="#EAF1FF" font-family="Segoe UI, Microsoft YaHei, Arial" font-size="13" font-weight="800">Docker Hub</text>
+  </g>
+</svg>
