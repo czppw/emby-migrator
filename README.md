@@ -6,7 +6,7 @@
 
 轻量 Docker Web 工具，用于通过 Emby API 导出和导入 Emby 元数据、项目图片和人物头像。
 
-本项目逻辑以现有 Python 脚本为基线：导出时保存 `manifest.json`、`info.json`、`raw.json` 和图片；导入时不使用旧 Emby 内部 ID 做跨服务器匹配，而是优先使用媒体文件名、ProviderIds、剧集信息、名称和 OriginalTitle。
+导出时保存 `manifest.json`、`info.json`、`raw.json` 和图片；导入时不使用旧 Emby 内部 ID 做跨服务器匹配，而是优先使用媒体文件名、ProviderIds、剧集信息、名称和 OriginalTitle。
 
 当前产品方向是单用户自托管工具：页面只提供一个访问密码入口，不提供额外账号体系。
 
