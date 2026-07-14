@@ -120,9 +120,101 @@ func TestResolveExportPathRejectsTraversal(t *testing.T) {
 		t.Fatalf("ResolveExportPath = (%q, %q), want (%q, pkg)", resolved, name, exportDir)
 	}
 	for _, input := range []string{"..", "../pkg", "..\\pkg", filepath.Join(dataDir, "outside")} {
-		if _, _, err := service.ResolveExportPath(input); err == nil || !strings.Contains(err.Error(), "exports directory") {
-			t.Fatalf("ResolveExportPath(%q) error = %v, want exports directory rejection", input, err)
+		if _, _, err := service.ResolveExportPath(input); err == nil || !strings.Contains(err.Error(), "allowed package directories") {
+			t.Fatalf("ResolveExportPath(%q) error = %v, want allowed package directories rejection", input, err)
 		}
+	}
+}
+
+func TestResolveExportPathAllowsConfiguredImportRoots(t *testing.T) {
+	dataDir := t.TempDir()
+	externalRoot := t.TempDir()
+	service := NewService(dataDir, externalRoot)
+	for _, packagePath := range []string{
+		filepath.Join(dataDir, "imports", "copied-package"),
+		filepath.Join(externalRoot, "mounted-package"),
+	} {
+		if err := os.MkdirAll(packagePath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.WriteJSON(filepath.Join(packagePath, "manifest.json"), storage.Manifest{}); err != nil {
+			t.Fatal(err)
+		}
+		resolved, _, err := service.ResolveExportPath(packagePath)
+		if err != nil {
+			t.Fatalf("ResolveExportPath(%q) returned error: %v", packagePath, err)
+		}
+		if resolved != packagePath {
+			t.Fatalf("ResolveExportPath(%q) = %q", packagePath, resolved)
+		}
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside-package")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(outside, "manifest.json"), storage.Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.ResolveExportPath(outside); err == nil || !strings.Contains(err.Error(), "allowed package directories") {
+		t.Fatalf("outside package error = %v", err)
+	}
+	if _, _, err := service.ResolveExportPath(filepath.Join("..", "imports", "copied-package")); err == nil {
+		t.Fatal("relative traversal into imports directory must be rejected")
+	}
+}
+
+func TestListImportPackagesIncludesLocalAndCopiedPackages(t *testing.T) {
+	dataDir := t.TempDir()
+	externalRoot := t.TempDir()
+	service := NewService(dataDir, externalRoot)
+	testPackages := []struct {
+		path    string
+		name    string
+		source  string
+		items   int
+		version string
+	}{
+		{path: filepath.Join(service.ExportsDir(), "local"), name: "local", source: "本机导出", items: 1, version: "4.8.11.0"},
+		{path: filepath.Join(dataDir, "imports", "copied"), name: "copied", source: "外部迁移包", items: 2, version: "4.9.5.0"},
+		{path: filepath.Join(externalRoot, "mounted"), name: "mounted", source: "外部迁移包", items: 3, version: "4.9.5.0"},
+	}
+	for index, testPackage := range testPackages {
+		if err := os.MkdirAll(testPackage.path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := storage.Manifest{
+			ExportedAt:  time.Date(2026, 7, 14, 10+index, 0, 0, 0, time.UTC),
+			EmbyVersion: testPackage.version,
+			Items:       make([]storage.ItemEntry, testPackage.items),
+		}
+		if err := storage.WriteJSON(filepath.Join(testPackage.path, "manifest.json"), manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	packages, err := service.ListImportPackages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packages) != len(testPackages) {
+		t.Fatalf("ListImportPackages returned %d packages: %#v", len(packages), packages)
+	}
+	byName := make(map[string]ImportPackageInfo, len(packages))
+	for _, packageInfo := range packages {
+		byName[packageInfo.Name] = packageInfo
+	}
+	for _, want := range testPackages {
+		got, ok := byName[want.name]
+		if !ok || got.Source != want.source || got.ItemCount != want.items || got.EmbyVersion != want.version {
+			t.Fatalf("package %s = %#v", want.name, got)
+		}
+	}
+	if byName["local"].Path != "local" {
+		t.Fatalf("local package path = %q", byName["local"].Path)
+	}
+	if !filepath.IsAbs(filepath.FromSlash(byName["copied"].Path)) || !filepath.IsAbs(filepath.FromSlash(byName["mounted"].Path)) {
+		t.Fatalf("copied package paths must be absolute: %#v", byName)
 	}
 }
 

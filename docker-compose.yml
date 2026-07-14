@@ -6,11 +6,13 @@ services:
     environment:
       TZ: Asia/Shanghai
       EMBY_MIGRATOR_PASSWORD: password
+      EMBY_MIGRATOR_IMPORT_ROOT: /imports
       EMBY_MIGRATOR_EMBY_DB_ROOT: /emby-dbs
       EMBY_MIGRATOR_DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${EMBY_MIGRATOR_DATA_DIR:-/opt/emby-migrator/data}:/data
       - ${EMBY_MIGRATOR_CONFIG_DIR:-/opt/emby-migrator/config}:/config
+      - ${EMBY_MIGRATOR_IMPORT_DIR:-/opt/emby-migrator/imports}:/imports
       - ${EMBY_CONFIG_DIR:-/opt/emby/config}:/emby-dbs/default
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

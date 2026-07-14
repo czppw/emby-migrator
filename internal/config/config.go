@@ -11,6 +11,7 @@ type Config struct {
 	ListenAddr            string
 	DataDir               string
 	ConfigDir             string
+	ImportRoot            string
 	EmbyDatabaseRoot      string
 	DockerHost            string
 	Version               string
@@ -27,9 +28,10 @@ func FromEnv() Config {
 		ListenAddr:            env("EMBY_MIGRATOR_ADDR", ":8787"),
 		DataDir:               env("EMBY_MIGRATOR_DATA", "/data"),
 		ConfigDir:             env("EMBY_MIGRATOR_CONFIG", "/config"),
+		ImportRoot:            env("EMBY_MIGRATOR_IMPORT_ROOT", "/imports"),
 		EmbyDatabaseRoot:      strings.TrimSpace(os.Getenv("EMBY_MIGRATOR_EMBY_DB_ROOT")),
 		DockerHost:            env("EMBY_MIGRATOR_DOCKER_HOST", "unix:///var/run/docker.sock"),
-		Version:               env("EMBY_MIGRATOR_VERSION", "1.1.0"),
+		Version:               env("EMBY_MIGRATOR_VERSION", "1.1.1"),
 		AdminPassword:         env("EMBY_MIGRATOR_PASSWORD", "password"),
 		SessionSecret:         os.Getenv("EMBY_MIGRATOR_SESSION_SECRET"),
 		MaxMemoryLogEntries:   envInt("EMBY_MIGRATOR_MAX_MEMORY_LOGS", 2000),

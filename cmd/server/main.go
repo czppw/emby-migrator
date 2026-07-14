@@ -24,6 +24,9 @@ func main() {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("create data dir: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "imports"), 0o755); err != nil {
+		log.Fatalf("create import packages dir: %v", err)
+	}
 	if err := os.MkdirAll(cfg.ConfigDir, 0o755); err != nil {
 		log.Fatalf("create config dir: %v", err)
 	}
@@ -35,7 +38,7 @@ func main() {
 		CompletedJobRetention: cfg.CompletedJobRetention,
 		ReleaseMemoryOnFinish: cfg.ReleaseMemoryOnFinish,
 	})
-	service := exporter.NewService(cfg.DataDir)
+	service := exporter.NewService(cfg.DataDir, cfg.ImportRoot)
 	handler := web.NewServer(cfg, jobs, service)
 
 	srv := &http.Server{

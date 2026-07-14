@@ -23,7 +23,17 @@ import (
 )
 
 type Service struct {
-	DataDir string
+	DataDir     string
+	ImportRoots []string
+}
+
+type ImportPackageInfo struct {
+	Name        string    `json:"name"`
+	Path        string    `json:"path"`
+	Source      string    `json:"source"`
+	ExportedAt  time.Time `json:"exportedAt,omitempty"`
+	ItemCount   int       `json:"itemCount"`
+	EmbyVersion string    `json:"embyVersion,omitempty"`
 }
 
 type ExportRequest struct {
@@ -485,8 +495,14 @@ type ImportClient interface {
 	UploadPersonImage(ctx context.Context, targetPersonEmbyID string, image ExportedImage) error
 }
 
-func NewService(dataDir string) *Service {
-	return &Service{DataDir: dataDir}
+func NewService(dataDir string, importRoots ...string) *Service {
+	roots := []string{filepath.Join(dataDir, "imports")}
+	for _, root := range importRoots {
+		if root = strings.TrimSpace(root); root != "" {
+			roots = append(roots, root)
+		}
+	}
+	return &Service{DataDir: dataDir, ImportRoots: uniquePaths(roots)}
 }
 
 func (s *Service) ExportsDir() string {
@@ -588,6 +604,120 @@ func (s *Service) ListExports() ([]string, error) {
 	return out, nil
 }
 
+func (s *Service) ListImportPackages() ([]ImportPackageInfo, error) {
+	packages := make([]ImportPackageInfo, 0)
+	seen := make(map[string]struct{})
+	if err := s.scanImportPackageRoot(s.ExportsDir(), "本机导出", true, seen, &packages); err != nil {
+		return nil, err
+	}
+	for _, root := range s.ImportRoots {
+		if err := s.scanImportPackageRoot(root, "外部迁移包", false, seen, &packages); err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(packages, func(i, j int) bool {
+		if packages[i].ExportedAt.Equal(packages[j].ExportedAt) {
+			return packages[i].Name > packages[j].Name
+		}
+		return packages[i].ExportedAt.After(packages[j].ExportedAt)
+	})
+	return packages, nil
+}
+
+func (s *Service) scanImportPackageRoot(root, source string, relativePath bool, seen map[string]struct{}, out *[]ImportPackageInfo) error {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(rootAbs)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	if packageInfo, ok := importPackageInfo(rootAbs, source, relativePath, rootAbs); ok {
+		appendImportPackage(packageInfo, rootAbs, seen, out)
+	}
+	entries, err := os.ReadDir(rootAbs)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		packagePath := filepath.Join(rootAbs, entry.Name())
+		packageInfo, ok := importPackageInfo(packagePath, source, relativePath, rootAbs)
+		if !ok {
+			continue
+		}
+		appendImportPackage(packageInfo, packagePath, seen, out)
+	}
+	return nil
+}
+
+func importPackageInfo(packagePath, source string, relativePath bool, root string) (ImportPackageInfo, bool) {
+	var manifest storage.Manifest
+	if err := storage.ReadJSON(filepath.Join(packagePath, "manifest.json"), &manifest); err != nil {
+		return ImportPackageInfo{}, false
+	}
+	value := packagePath
+	if relativePath {
+		rel, err := filepath.Rel(root, packagePath)
+		if err != nil || rel == "." {
+			return ImportPackageInfo{}, false
+		}
+		value = rel
+	}
+	return ImportPackageInfo{
+		Name:        filepath.Base(packagePath),
+		Path:        filepath.ToSlash(value),
+		Source:      source,
+		ExportedAt:  manifest.ExportedAt,
+		ItemCount:   len(manifest.Items),
+		EmbyVersion: manifest.EmbyVersion,
+	}, true
+}
+
+func appendImportPackage(packageInfo ImportPackageInfo, packagePath string, seen map[string]struct{}, out *[]ImportPackageInfo) {
+	key, err := filepath.EvalSymlinks(packagePath)
+	if err != nil {
+		key, _ = filepath.Abs(packagePath)
+	}
+	key = filepath.Clean(key)
+	if _, exists := seen[key]; exists {
+		return
+	}
+	seen[key] = struct{}{}
+	*out = append(*out, packageInfo)
+}
+
+func uniquePaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]struct{})
+	for _, value := range paths {
+		value = filepath.Clean(strings.TrimSpace(value))
+		if value == "." || value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func (s *Service) latestBaselineManifest(source string, libraries []emby.Library, excludeName string) (storage.Manifest, string, string, bool) {
 	exports, err := s.ListExports()
 	if err != nil {
@@ -655,8 +785,9 @@ func (s *Service) ResolveExportPath(exportPath string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	isAbsolute := filepath.IsAbs(cleaned)
 	var resolved string
-	if filepath.IsAbs(cleaned) {
+	if isAbsolute {
 		resolved, err = filepath.Abs(cleaned)
 	} else {
 		resolved, err = filepath.Abs(filepath.Join(exportsDir, cleaned))
@@ -664,20 +795,49 @@ func (s *Service) ResolveExportPath(exportPath string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	rel, err := filepath.Rel(exportsDir, resolved)
-	if err != nil {
-		return "", "", err
+	allowedRoots := []string{exportsDir}
+	if isAbsolute {
+		allowedRoots = append(allowedRoots, s.ImportRoots...)
 	}
-	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." || filepath.IsAbs(rel) {
-		return "", "", fmt.Errorf("exportPath must stay under exports directory")
+	if !pathWithinAnyRoot(resolved, allowedRoots) {
+		return "", "", fmt.Errorf("exportPath must stay under allowed package directories")
 	}
-	if _, err := os.Stat(filepath.Join(resolved, "manifest.json")); err != nil {
+	manifestPath := filepath.Join(resolved, "manifest.json")
+	if _, err := os.Stat(manifestPath); err != nil {
 		if os.IsNotExist(err) {
 			return "", "", fmt.Errorf("export package not found: %s", exportPath)
 		}
 		return "", "", err
 	}
+	resolvedReal, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", "", err
+	}
+	if !pathWithinAnyRoot(resolvedReal, allowedRoots) {
+		return "", "", fmt.Errorf("exportPath resolves outside allowed package directories")
+	}
 	return resolved, filepath.Base(resolved), nil
+}
+
+func pathWithinAnyRoot(candidate string, roots []string) bool {
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		if resolvedRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
+			rootAbs = resolvedRoot
+		}
+		rel, err := filepath.Rel(rootAbs, candidateAbs)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) ListImportReports(exportPath string) ([]ImportReportInfo, error) {

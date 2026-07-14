@@ -23,6 +23,7 @@ type Server struct {
 	usersCache            cachedUsersConfig
 	telegramNotifications sync.Map
 	docker                dockerController
+	versionCheck          versionCheckCache
 }
 
 type connectionRequest struct {
@@ -100,6 +101,7 @@ func NewServer(cfg config.Config, jobs *job.Manager, exporter *exporter.Service)
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/version", s.handleVersionCheck)
 	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
@@ -191,7 +193,7 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExports(w http.ResponseWriter, r *http.Request) {
-	exports, err := s.exporter.ListExports()
+	exports, err := s.exporter.ListImportPackages()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

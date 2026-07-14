@@ -193,6 +193,32 @@ h1 {
   white-space: nowrap;
 }
 
+.version-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #9ce0d2;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.version-update::before {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #5eead4;
+  content: "";
+}
+
+.version-update:hover {
+  color: #ccfbf1;
+  text-decoration: underline;
+}
+
 .app-footer {
   display: flex;
   align-items: center;
@@ -1236,6 +1262,20 @@ h3 {
   min-width: 0;
 }
 
+.import-package-copy-note {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.import-package-copy-note strong {
+  color: var(--ink);
+}
+
 .security-panel {
   grid-column: 1 / -1;
 }
@@ -1461,9 +1501,11 @@ h3 {
     grid-template-columns: 1fr;
   }
 
+
   .database-picker .button {
     width: 100%;
   }
+
 
   .image-type-grid {
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 118px), 1fr));
@@ -2378,6 +2420,10 @@ body.auth-page-active .app-shell {
   color: rgba(255, 255, 255, 0.82);
 }
 
+.app-header .version-update {
+  color: #9ce0d2;
+}
+
 .app-header .header-status,
 .app-header .button.ghost {
   border-color: rgba(255, 255, 255, 0.14);
@@ -2635,6 +2681,10 @@ body.auth-page-active .app-shell {
 .app-header .version-badge {
   min-height: 22px;
   padding: 2px 8px;
+  font-size: 11px;
+}
+
+.app-header .version-update {
   font-size: 11px;
 }
 

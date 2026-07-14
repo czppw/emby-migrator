@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-czppw%2Femby--migrator-111827?style=for-the-badge&logo=github)](https://github.com/czppw/emby-migrator)
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-czppwa%2Femby--migrator-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/czppwa/emby-migrator)
-![Version](https://img.shields.io/badge/version-v1.1.0-315CF6?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v1.1.1-315CF6?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-22C55E?style=for-the-badge)
 
 # Emby Migrator
@@ -30,6 +30,7 @@
 | 名称匹配 | 不依赖旧 Emby 内部 ID，优先按媒体文件名、ProviderIds、剧集信息、名称和 OriginalTitle 匹配。 |
 | 多服务器地址簿 | 保存多个 Emby 地址和 API Key，导出服务器和导入服务器可以分别选择。 |
 | 实时日志 | 网页端实时查看任务进度，完整日志可下载。 |
+| 版本检查 | 后台缓存检查 GitHub 最新正式版，仅在有新版本时于顶部显示小提示。 |
 | 导入报告 | 生成匹配、未匹配、歧义、错误、图片和头像统计报告。 |
 | Telegram 通知 | 支持中文任务通知，可配置代理，代理只用于访问 Telegram。 |
 | 单用户入口 | 提供简单密码登录入口，适合个人自托管。 |
@@ -60,7 +61,7 @@
 ### 1. 创建宿主机目录
 
 ```bash
-mkdir -p /opt/emby-migrator/data /opt/emby-migrator/config
+mkdir -p /opt/emby-migrator/data/imports /opt/emby-migrator/config /opt/emby-migrator/imports
 ```
 
 ### 2. 启动容器
@@ -72,8 +73,10 @@ docker run -d \
   --network host \
   -e TZ=Asia/Shanghai \
   -e EMBY_MIGRATOR_PASSWORD=password \
+  -e EMBY_MIGRATOR_IMPORT_ROOT=/imports \
   -v /opt/emby-migrator/data:/data \
   -v /opt/emby-migrator/config:/config \
+  -v /opt/emby-migrator/imports:/imports \
   czppwa/emby-migrator:latest
 ```
 
@@ -93,7 +96,7 @@ docker run -d \
 如果想固定正式版：
 
 ```bash
-czppwa/emby-migrator:v1.1.0
+czppwa/emby-migrator:v1.1.1
 ```
 
 ### 3. 打开网页
@@ -123,11 +126,13 @@ services:
     environment:
       TZ: Asia/Shanghai
       EMBY_MIGRATOR_PASSWORD: password
+      EMBY_MIGRATOR_IMPORT_ROOT: /imports
       EMBY_MIGRATOR_EMBY_DB_ROOT: /emby-dbs
       EMBY_MIGRATOR_DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - /opt/emby-migrator/data:/data
       - /opt/emby-migrator/config:/config
+      - /opt/emby-migrator/imports:/imports
       - /opt/emby/config:/emby-dbs/default
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -143,6 +148,8 @@ services:
 | 默认密码 | `password` |
 | 容器数据目录 | `/data` |
 | 容器配置目录 | `/config` |
+| 本机迁移包目录 | `/data/imports` |
+| 独立迁移包挂载目录 | `/imports` |
 | Emby 数据库挂载根目录 | `/emby-dbs` |
 | 容器导出包目录 | `/data/exports` |
 | 宿主机导出包目录 | `/opt/emby-migrator/data/exports` |
@@ -173,6 +180,14 @@ services:
 11. **阶段一（在线）**：需要恢复媒体技术信息时，保持目标 Emby 运行，确认在线导入已生成数据库计划。
 12. 确认页面已自动识别数据库，填写并保存目标 Emby 容器名。
 13. 启用自动停启后点击 **应用媒体信息计划**，程序会停止容器、写库、启动并回读验证。
+
+从旧设备复制导出包时，请复制完整文件夹（必须包含 `manifest.json`）到宿主机：
+
+```text
+/opt/emby-migrator/data/imports/
+```
+
+容器内对应路径为 `/data/imports/包名`。点击“刷新导出包”后会自动出现在列表中。使用独立挂载目录时，将完整导出包文件夹放到 `/opt/emby-migrator/imports/`，程序会从容器内 `/imports` 自动扫描。
 
 ---
 

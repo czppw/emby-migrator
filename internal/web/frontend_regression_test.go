@@ -13,8 +13,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 	app := readFrontendFile(t, "assets", "app.js")
 
 	for _, marker := range []string{
-		`./assets/styles.css?v=1.1.0`,
-		`./assets/app.js?v=1.1.0`,
+		`./assets/styles.css?v=1.1.1`,
+		`./assets/app.js?v=1.1.1`,
 		"https://github.com/czppw/emby-migrator",
 		"https://hub.docker.com/r/czppwa/emby-migrator",
 		"License: AGPL-3.0-or-later",
@@ -32,6 +32,9 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		`id="embyContainerName"`,
 		`id="autoManageContainer"`,
 		"自动停启",
+		"从旧设备迁移导出包",
+		"/opt/emby-migrator/data/imports/",
+		`id="versionUpdate"`,
 	} {
 		if !strings.Contains(index, marker) {
 			t.Fatalf("index.html missing regression marker %q", marker)
@@ -59,6 +62,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		`/api/emby-databases?profileId=${encodeURIComponent(profileId)}`,
 		"targetProfileId: selectedTargetProfileId",
 		"autoManageContainer: Boolean(els.autoManageContainer?.checked)",
+		"handleRefreshExports();",
+		`fetchJson("/api/version")`,
 	} {
 		if !strings.Contains(app, marker) {
 			t.Fatalf("app.js missing image-type default marker %q", marker)
@@ -73,6 +78,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		"overflow: visible;",
 		".app-footer",
 		".database-picker",
+		".import-package-copy-note",
+		".version-update",
 		".switch-control input:checked + .switch-track",
 	} {
 		if !strings.Contains(styles, marker) {

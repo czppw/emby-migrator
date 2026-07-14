@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Emby Migrator</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=1.1.0" />
-    <script src="./assets/app.js?v=1.1.0" defer></script>
+    <link rel="stylesheet" href="./assets/styles.css?v=1.1.1" />
+    <script src="./assets/app.js?v=1.1.1" defer></script>
   </head>
   <body>
     <section class="auth-gate is-hidden" id="authGate" aria-labelledby="authTitle">
@@ -80,7 +80,14 @@
           <p class="eyebrow">Emby 元数据迁移工具</p>
           <div class="brand-row">
             <h1>Emby Migrator</h1>
-            <span class="version-badge" id="appVersion">v1.1.0</span>
+            <span class="version-badge" id="appVersion">v1.1.1</span>
+            <a
+              class="version-update is-hidden"
+              id="versionUpdate"
+              href="https://github.com/czppw/emby-migrator/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+            ></a>
           </div>
         </div>
         <div class="header-actions">
@@ -430,11 +437,20 @@
             <div class="task-main">
               <div class="form-grid import-source-grid">
                 <label class="field span-2">
-                  <span>已发现导出包</span>
+                  <span>自动发现导出包</span>
                   <select id="exportsSelect">
                     <option value="">先刷新并选择导出包</option>
                   </select>
+                  <small class="field-hint">自动扫描 /data/exports、/data/imports 和 /imports。</small>
                 </label>
+                <div class="import-package-copy-note span-2">
+                  <strong>从旧设备迁移导出包</strong>
+                  <span>
+                    请把完整导出包文件夹复制到宿主机 /opt/emby-migrator/data/imports/，文件夹必须包含
+                    manifest.json；复制完成后点击“刷新导出包”即可识别。独立挂载目录可使用
+                    /opt/emby-migrator/imports/。
+                  </span>
+                </div>
               </div>
 
               <fieldset class="option-grid import-options">

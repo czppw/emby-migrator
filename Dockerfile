@@ -2,6 +2,7 @@ FROM golang:1.22-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY web ./web
@@ -21,15 +22,16 @@ WORKDIR /app
 COPY --from=build /out/emby-migrator /app/emby-migrator
 COPY web /app/web
 COPY LICENSE NOTICE /app/
-RUN mkdir -p /data /config /emby-dbs
+RUN mkdir -p /data /config /emby-dbs /imports
 
 ENV EMBY_MIGRATOR_ADDR=:8787 \
     EMBY_MIGRATOR_DATA=/data \
     EMBY_MIGRATOR_CONFIG=/config \
+    EMBY_MIGRATOR_IMPORT_ROOT=/imports \
     EMBY_MIGRATOR_EMBY_DB_ROOT=/emby-dbs \
     TZ=Asia/Shanghai
 
 EXPOSE 8787
-VOLUME ["/data", "/config", "/emby-dbs"]
+VOLUME ["/data", "/config", "/emby-dbs", "/imports"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD port="${EMBY_MIGRATOR_ADDR##*:}"; [ -n "$port" ] || port=8787; wget -qO- "http://127.0.0.1:${port}/api/health" >/dev/null || exit 1
 ENTRYPOINT ["/app/emby-migrator"]

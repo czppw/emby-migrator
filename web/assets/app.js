@@ -125,6 +125,7 @@
     renderJobList();
     updateControls();
     checkAuth();
+    checkLatestVersion();
   }
 
   function retireLegacyUserManagementUI() {
@@ -143,6 +144,7 @@
       "authNotice",
       "authWarning",
       "appVersion",
+      "versionUpdate",
       "currentUserBadge",
       "logoutBtn",
       "changePasswordToggleBtn",
@@ -222,6 +224,24 @@
     ].forEach((id) => {
       els[id] = document.getElementById(id);
     });
+  }
+
+  async function checkLatestVersion() {
+    try {
+      const data = await fetchJson("/api/version");
+      if (!data.checked || !data.updateAvailable || !data.latestVersion) {
+        return;
+      }
+      const latestVersion = String(data.latestVersion).replace(/^v/i, "");
+      els.versionUpdate.textContent = `有更新 v${latestVersion}`;
+      if (data.releaseUrl) {
+        els.versionUpdate.href = String(data.releaseUrl);
+      }
+      els.versionUpdate.title = `发现新版本 v${latestVersion}`;
+      els.versionUpdate.classList.remove("is-hidden");
+    } catch {
+      // Version checks are optional and must never block the application.
+    }
   }
 
   function bindEvents() {
@@ -1755,7 +1775,14 @@
       const label = String(readFirst(raw, ["name", "Name", "id", "Id"]) || value);
       const createdAt = readFirst(raw, ["createdAt", "CreatedAt", "time", "Time"]);
       const itemCount = readFirst(raw, ["itemCount", "ItemCount", "count", "Count"]);
-      const meta = [createdAt, itemCount !== undefined ? `${itemCount} 项` : ""]
+      const source = readFirst(raw, ["source", "Source"]);
+      const embyVersion = readFirst(raw, ["embyVersion", "EmbyVersion"]);
+      const meta = [
+        source,
+        embyVersion ? `Emby ${embyVersion}` : "",
+        createdAt,
+        itemCount !== undefined ? `${itemCount} 项` : "",
+      ]
         .filter(Boolean)
         .join(" · ");
 
@@ -2152,6 +2179,7 @@
   }
 
   function renderJobStatus(data, fallbackKind) {
+	const previousStatus = state.currentJobStatus;
     const statusValue =
       readFirst(data, ["status", "state", "Status", "State"]) ||
       readFirst(data, ["phase", "Phase"]);
@@ -2167,6 +2195,13 @@
     els.jobId.textContent = jobId;
     els.jobProgress.textContent = formatProgress(data);
     state.currentJobStatus = normalizeStatus(status);
+    if (
+      state.currentJobStatus === "done" &&
+      previousStatus !== "done" &&
+      String(kind).toLowerCase().trim() === "export"
+    ) {
+      handleRefreshExports();
+    }
     if (readJobId(data) || statusValue) {
       upsertJob({ ...safeObject(data), id: jobId, type: kind, status });
     }
