@@ -276,6 +276,96 @@ func TestItemUnmarshalToleratesNumericNestedIDs(t *testing.T) {
 	}
 }
 
+func TestItemUnmarshalPreservesStructuredMediaTechnicalFields(t *testing.T) {
+	payload := []byte(`{
+		"Id": "item-media-1",
+		"Name": "Media Fixture",
+		"Type": "Movie",
+		"MediaSources": [{
+			"Id": "source-1",
+			"Protocol": "File",
+			"MediaStreams": [{"Type": "Video", "Codec": "hevc"}]
+		}],
+		"MediaStreams": [
+			{"Type": "Video", "Codec": "hevc", "BitRate": 123456},
+			{"Type": "Audio", "Codec": "aac", "Language": "jpn"}
+		],
+		"Chapters": [{"Name": "Intro", "StartPositionTicks": 0}]
+	}`)
+
+	var item Item
+	if err := json.Unmarshal(payload, &item); err != nil {
+		t.Fatalf("Item should unmarshal media technical fields: %v", err)
+	}
+	if len(item.MediaSources) != 1 || item.MediaSources[0]["Id"] != "source-1" {
+		t.Fatalf("MediaSources not preserved structurally: %#v", item.MediaSources)
+	}
+	if len(item.MediaStreams) != 2 || item.MediaStreams[0]["Codec"] != "hevc" || item.MediaStreams[1]["Language"] != "jpn" {
+		t.Fatalf("MediaStreams not preserved structurally: %#v", item.MediaStreams)
+	}
+	if len(item.Chapters) != 1 || item.Chapters[0]["Name"] != "Intro" {
+		t.Fatalf("Chapters not preserved structurally: %#v", item.Chapters)
+	}
+	if rawSources, ok := item.Raw["MediaSources"].([]any); !ok || len(rawSources) != 1 {
+		t.Fatalf("Raw MediaSources not preserved: %#v", item.Raw["MediaSources"])
+	}
+	rawJSON, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("Item should marshal after media unmarshal: %v", err)
+	}
+	if strings.Contains(string(rawJSON), testAPIKey) {
+		t.Fatalf("Item JSON leaked API key material: %s", rawJSON)
+	}
+}
+
+func TestItemUsesCrossVersionCollectionEndpoint(t *testing.T) {
+	for _, version := range []string{"4.8.11.0", "4.9.5.0"} {
+		t.Run(version, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/Items" {
+					http.Error(w, "wrong item endpoint "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+					return
+				}
+				if got := r.URL.Query().Get("Ids"); got != "item-9" {
+					http.Error(w, "wrong Ids "+got, http.StatusBadRequest)
+					return
+				}
+				if got := r.URL.Query().Get("Limit"); got != "1" {
+					http.Error(w, "wrong Limit "+got, http.StatusBadRequest)
+					return
+				}
+				fields := r.URL.Query().Get("Fields")
+				for _, field := range []string{"MediaSources", "MediaStreams", "Chapters"} {
+					if !strings.Contains(fields, field) {
+						http.Error(w, "missing field "+field, http.StatusBadRequest)
+						return
+					}
+				}
+				writeItemsPage(t, w, 1, []map[string]interface{}{{
+					"Id": "item-9", "Name": "Fixture", "Type": "Movie",
+					"MediaSources": []map[string]any{{"Container": "mkv"}},
+					"MediaStreams": []map[string]any{{"Type": "Video", "Codec": "h264"}},
+					"Chapters":     []map[string]any{{"Name": "Opening", "StartPositionTicks": 0}},
+				}})
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, testAPIKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.HTTPClient = server.Client()
+			item, err := client.Item(context.Background(), "item-9")
+			if err != nil {
+				t.Fatalf("Item returned error for Emby %s response: %v", version, err)
+			}
+			if item.ID != "item-9" || len(item.MediaSources) != 1 || len(item.MediaStreams) != 1 || len(item.Chapters) != 1 {
+				t.Fatalf("Item lost media fields for Emby %s: %#v", version, item)
+			}
+		})
+	}
+}
+
 func TestSearchItemsInLibrariesScopesRequestsByParentID(t *testing.T) {
 	var parentIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

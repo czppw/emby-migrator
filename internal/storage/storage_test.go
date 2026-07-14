@@ -171,7 +171,8 @@ func TestManifestJSONKeepsCompleteMetadataPeopleAvatarsAndNoAPIKey(t *testing.T)
 					{Type: "Primary", Path: "libraries/movies/items/provider-imdb-tt0133093/primary.jpg", Size: 3, SHA256: "abc123"},
 					{Type: "Backdrop", Index: 0, Path: "libraries/movies/items/provider-imdb-tt0133093/backdrop-0.jpg", Size: 4, SHA256: "def456"},
 				},
-				People: []string{"person-provider-imdb-nm0000206"},
+				People:    []string{"person-provider-imdb-nm0000206"},
+				MediaInfo: &MediaInfo{SourcesCount: 1, StreamsCount: 2, ChaptersCount: 1, Hash: "mediahash"},
 			},
 		},
 		People: []PersonEntry{
@@ -192,12 +193,16 @@ func TestManifestJSONKeepsCompleteMetadataPeopleAvatarsAndNoAPIKey(t *testing.T)
 			{Scope: "image", ID: "bad-item", Message: "image 404"},
 		},
 		Summary: Summary{
-			Libraries:    1,
-			Items:        1,
-			People:       1,
-			ItemImages:   2,
-			PeopleImages: 1,
-			Errors:       1,
+			Libraries:          1,
+			Items:              1,
+			People:             1,
+			ItemImages:         2,
+			PeopleImages:       1,
+			Errors:             1,
+			ItemsWithMediaInfo: 1,
+			MediaSources:       1,
+			MediaStreams:       2,
+			Chapters:           1,
 		},
 	}
 
@@ -227,11 +232,72 @@ func TestManifestJSONKeepsCompleteMetadataPeopleAvatarsAndNoAPIKey(t *testing.T)
 		"peopleImages",
 		"face123",
 		"image 404",
+		"mediaInfo",
+		"mediaStreams",
+		"mediahash",
 		exportedAt.Format(time.RFC3339),
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("manifest JSON missing %q: %s", want, text)
 		}
+	}
+}
+
+func TestManifestMediaInfoRoundTripAndSummary(t *testing.T) {
+	mediaInfo := NewMediaInfo(
+		[]map[string]any{{"Id": "source-1", "Protocol": "File"}},
+		[]map[string]any{{"Type": "Video", "Codec": "hevc"}, {"Type": "Audio", "Codec": "aac"}},
+		[]map[string]any{{"Name": "Intro", "StartPositionTicks": json.Number("0")}},
+	)
+	if mediaInfo == nil || mediaInfo.SourcesHash == "" || mediaInfo.StreamsHash == "" || mediaInfo.ChaptersHash == "" || mediaInfo.Hash == "" {
+		t.Fatalf("NewMediaInfo did not compute hashes: %#v", mediaInfo)
+	}
+
+	manifest, err := BuildManifest(ManifestInput{
+		ToolVersion:   "0.1.0-test",
+		ServerVersion: "4.8.11.0",
+		ExportedAt:    time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC),
+		APIKey:        testManifestAPIKey,
+		Libraries:     []ManifestLibrary{{ID: "lib-movies", Name: "Movies", Slug: "movies"}},
+		Items: []ManifestItem{{
+			StableKey:   "provider-tmdb-987654",
+			EmbyID:      "item-media-1",
+			Type:        "Movie",
+			Name:        "Media Fixture",
+			Path:        "/media/fixture.mkv",
+			ProviderIDs: map[string]string{"Tmdb": "987654"},
+			MediaInfo:   mediaInfo,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildManifest returned error: %v", err)
+	}
+	if manifest.Summary.ItemsWithMediaInfo != 1 || manifest.Summary.MediaSources != 1 || manifest.Summary.MediaStreams != 2 || manifest.Summary.Chapters != 1 {
+		t.Fatalf("media summary not populated: %#v", manifest.Summary)
+	}
+
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("manifest should marshal: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, testManifestAPIKey) || strings.Contains(strings.ToLower(text), "api_key") || strings.Contains(strings.ToLower(text), "x-emby-token") {
+		t.Fatalf("manifest leaked API key material: %s", text)
+	}
+
+	var decoded Manifest
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("manifest should roundtrip: %v", err)
+	}
+	if len(decoded.Items) != 1 || decoded.Items[0].MediaInfo == nil {
+		t.Fatalf("roundtrip lost item mediaInfo: %#v", decoded.Items)
+	}
+	got := decoded.Items[0].MediaInfo
+	if got.SourcesCount != 1 || got.StreamsCount != 2 || got.ChaptersCount != 1 || got.Hash != mediaInfo.Hash {
+		t.Fatalf("roundtrip changed mediaInfo: got %#v want %#v", got, mediaInfo)
+	}
+	if decoded.Summary.MediaStreams != 2 || decoded.Summary.Chapters != 1 {
+		t.Fatalf("roundtrip lost media summary: %#v", decoded.Summary)
 	}
 }
 
@@ -258,9 +324,15 @@ func TestItemInfoPreservesRawEmbyMetadataAndPeopleForImportValidation(t *testing
 			},
 			ImageTags:         map[string]string{"Primary": "primary-tag"},
 			BackdropImageTags: []string{"bd-0"},
+			MediaSources:      []map[string]any{{"Id": "source-1", "Protocol": "File"}},
+			MediaStreams:      []map[string]any{{"Type": "Video", "Codec": "hevc"}},
+			Chapters:          []map[string]any{{"Name": "Intro", "StartPositionTicks": 0}},
 			Raw: map[string]any{
-				"Id":          "old-item-1",
-				"ProviderIds": map[string]any{"Imdb": "tt0133093"},
+				"Id":           "old-item-1",
+				"ProviderIds":  map[string]any{"Imdb": "tt0133093"},
+				"MediaSources": []map[string]any{{"Id": "source-1", "Protocol": "File"}},
+				"MediaStreams": []map[string]any{{"Type": "Video", "Codec": "hevc"}},
+				"Chapters":     []map[string]any{{"Name": "Intro", "StartPositionTicks": 0}},
 			},
 		},
 		StableKey:  "provider-imdb-tt0133093",
@@ -293,6 +365,10 @@ func TestItemInfoPreservesRawEmbyMetadataAndPeopleForImportValidation(t *testing
 		"People",
 		"PrimaryImageTag",
 		"BackdropImageTags",
+		"MediaSources",
+		"MediaStreams",
+		"Chapters",
+		"hevc",
 		"Raw",
 		"nm0000206",
 	} {

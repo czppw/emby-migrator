@@ -148,6 +148,31 @@ func TestAppSettingsRejectsBlankAPIKeyForNewServer(t *testing.T) {
 	}, nil, http.StatusBadRequest)
 }
 
+func TestNormalizedProfilePersistsMediaDatabaseAutomation(t *testing.T) {
+	profile, err := normalizedProfileFromSave(appProfileSaveRequest{
+		BaseURL:             "http://127.0.0.1:8096",
+		APIKey:              "test-key",
+		DatabasePath:        "emby/data/library.db",
+		ContainerName:       "emby",
+		AutoManageContainer: true,
+	}, nil, "2026-07-14T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.DatabasePath != "emby/data/library.db" || profile.ContainerName != "emby" || !profile.AutoManageContainer {
+		t.Fatalf("automation profile fields were not preserved: %#v", profile)
+	}
+
+	_, err = normalizedProfileFromSave(appProfileSaveRequest{
+		BaseURL:             "http://127.0.0.1:8096",
+		APIKey:              "test-key",
+		AutoManageContainer: true,
+	}, nil, "2026-07-14T00:00:00Z")
+	if err == nil {
+		t.Fatal("automatic container management without a container name should be rejected")
+	}
+}
+
 func TestAppProfilesRejectSecondServerWithoutAddressAPIKey(t *testing.T) {
 	configDir := t.TempDir()
 	app := httptest.NewServer(NewServer(

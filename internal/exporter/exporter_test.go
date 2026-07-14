@@ -35,6 +35,46 @@ func TestItemDirectoryBasePrefersMediaFileStemAndKeepsStableKeySeparate(t *testi
 	}
 }
 
+func TestExactNameMatchesTreatsPortablePunctuationAsEquivalent(t *testing.T) {
+	items := []emby.Item{
+		{ID: "target", Type: "Movie", Name: "Big Buck Bunny", ProductionYear: 2008},
+		{ID: "wrong-type", Type: "Series", Name: "Big Buck Bunny", ProductionYear: 2008},
+	}
+
+	matches := exactNameMatches(items, "Big.Buck.Bunny", "Movie")
+	if len(matches) != 1 || matches[0].ID != "target" {
+		t.Fatalf("exactNameMatches = %#v, want the punctuation-normalized movie", matches)
+	}
+}
+
+func TestExactNameMatchesPrefersStrictNameBeforePortableVariants(t *testing.T) {
+	items := []emby.Item{
+		{ID: "strict", Type: "Movie", Name: "Big.Buck.Bunny"},
+		{ID: "portable", Type: "Movie", Name: "Big Buck Bunny"},
+	}
+
+	matches := exactNameMatches(items, "Big.Buck.Bunny", "Movie")
+	if len(matches) != 1 || matches[0].ID != "strict" {
+		t.Fatalf("exactNameMatches = %#v, want only the strict match", matches)
+	}
+}
+
+func TestPortableNameMatchesRemainAmbiguousWithoutUniqueYear(t *testing.T) {
+	items := []emby.Item{
+		{ID: "old", Type: "Movie", Name: "Big Buck Bunny", ProductionYear: 2008},
+		{ID: "new", Type: "Movie", Name: "Big-Buck-Bunny", ProductionYear: 2024},
+	}
+
+	matches := exactNameMatches(items, "Big.Buck.Bunny", "Movie")
+	if len(matches) != 2 {
+		t.Fatalf("exactNameMatches = %#v, want both normalized candidates", matches)
+	}
+	selected, narrowed, ok := chooseUniqueMatch(matches, 2008)
+	if !ok || selected.ID != "old" || len(narrowed) != 1 {
+		t.Fatalf("chooseUniqueMatch = (%#v, %#v, %v), want the unique 2008 item", selected, narrowed, ok)
+	}
+}
+
 func TestSeasonStableKeyIncludesParentSeriesPath(t *testing.T) {
 	first := storage.StableItemKey(emby.Item{
 		Type: "Season",
@@ -243,6 +283,43 @@ func TestResumeSuccessfulItemsDoesNotResumeImageFailedItems(t *testing.T) {
 	}
 	if shouldCheckpointMatch(ImportMatch{StableKey: "item", Status: "updated", ImageFailures: 1}, false) {
 		t.Fatalf("image-failed updated match should not be checkpointed")
+	}
+}
+
+func TestResumeSuccessfulItemsRequiresCompletedMediaInfoWhenEnabled(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := ImportTarget{ServerID: "target-a"}
+	checkpoint := newImportCheckpointStore(exportDir, target)
+	if err := checkpoint.Record(ImportMatch{StableKey: "media-updated-checkpoint", Status: "updated", MediaInfoUpdated: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-100000.json"), ImportReport{
+		Target: target,
+		Matches: []ImportMatch{
+			{StableKey: "legacy-no-media", Status: "updated"},
+			{StableKey: "media-failed", Status: "updated", MediaInfoFailed: 1},
+			{StableKey: "media-updated", Status: "updated", MediaInfoUpdated: 1},
+			{StableKey: "media-skipped", Status: "updated", MediaInfoSkipped: 1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done, _ := service.resumeSuccessfulItems(exportDir, target, true)
+	for _, key := range []string{"media-updated-checkpoint", "media-updated", "media-skipped"} {
+		if !done[key] {
+			t.Fatalf("completed media info item %q should resume: %#v", key, done)
+		}
+	}
+	for _, key := range []string{"legacy-no-media", "media-failed"} {
+		if done[key] {
+			t.Fatalf("incomplete media info item %q must be retried: %#v", key, done)
+		}
 	}
 }
 
@@ -579,8 +656,8 @@ func TestExportEnrichesItemsWhenListResponseOmitsImagesAndPeople(t *testing.T) {
 				},
 				"TotalRecordCount": 1,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1":
-			writeExporterJSON(t, w, map[string]any{
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "item-1":
+			writeExporterJSON(t, w, map[string]any{"Items": []map[string]any{{
 				"Id":          "item-1",
 				"Name":        "Movie From Detail",
 				"Type":        "Movie",
@@ -595,7 +672,7 @@ func TestExportEnrichesItemsWhenListResponseOmitsImagesAndPeople(t *testing.T) {
 						"PrimaryImageTag": "person-tag",
 					},
 				},
-			})
+			}}, "TotalRecordCount": 1})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images":
 			writeExporterJSON(t, w, []map[string]any{})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images/Primary":
@@ -639,6 +716,224 @@ func TestExportEnrichesItemsWhenListResponseOmitsImagesAndPeople(t *testing.T) {
 	}
 }
 
+func TestExportWritesRawMediaSourcesAndStreamsToPackage(t *testing.T) {
+	var detailFields string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.9.5.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("ParentId") == "lib-movies":
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{
+						"Id":   "item-raw-media",
+						"Name": "Raw Media Fixture",
+						"Type": "Movie",
+						"Path": `D:\Movies\Raw Media Fixture.mkv`,
+					},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "item-raw-media":
+			detailFields = r.URL.Query().Get("Fields")
+			if !strings.Contains(detailFields, "MediaSources") || !strings.Contains(detailFields, "MediaStreams") {
+				http.Error(w, "detail request missing media technical fields: "+detailFields, http.StatusBadRequest)
+				return
+			}
+			writeExporterJSON(t, w, map[string]any{"Items": []map[string]any{rawItemWithMediaTechnicalFieldsFixture()}, "TotalRecordCount": 1})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(t.TempDir())
+	j := job.NewManager().Create("export")
+	j.Start()
+
+	result, err := service.Export(context.Background(), j, ExportRequest{
+		Connection:       emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries:        []emby.Library{{ID: "lib-movies", Name: "Movies"}},
+		SkipImages:       true,
+		IncludeMediaInfo: true,
+	})
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	if detailFields == "" {
+		t.Fatalf("export did not enrich the list item with a detail request")
+	}
+	if len(result.Manifest.Items) != 1 {
+		t.Fatalf("manifest items = %#v, want one item", result.Manifest.Items)
+	}
+	entry := result.Manifest.Items[0]
+	if entry.RawPath == "" || entry.InfoPath == "" {
+		t.Fatalf("manifest item should point at raw and info files: %#v", entry)
+	}
+	if entry.MediaInfo == nil || entry.MediaInfo.SourcesCount != 1 || entry.MediaInfo.StreamsCount != 2 || entry.MediaInfo.ChaptersCount != 1 {
+		t.Fatalf("manifest item should summarize media technical info: %#v", entry.MediaInfo)
+	}
+	if result.Manifest.Summary.ItemsWithMediaInfo != 1 || result.Manifest.Summary.MediaSources != 1 || result.Manifest.Summary.MediaStreams != 2 || result.Manifest.Summary.Chapters != 1 {
+		t.Fatalf("manifest summary should count media technical info: %#v", result.Manifest.Summary)
+	}
+
+	var raw map[string]any
+	if err := storage.ReadJSON(filepath.Join(result.Path, filepath.FromSlash(entry.RawPath)), &raw); err != nil {
+		t.Fatalf("reading raw item returned error: %v", err)
+	}
+	assertRawMediaTechnicalFields(t, raw)
+
+	var info storage.ItemInfo
+	if err := storage.ReadJSON(filepath.Join(result.Path, filepath.FromSlash(entry.InfoPath)), &info); err != nil {
+		t.Fatalf("reading item info returned error: %v", err)
+	}
+	assertRawMediaTechnicalFields(t, rawPayloadFromItemInfo(t, info))
+
+	validation := ValidateExportPackage(result.Path, result.Manifest)
+	if !validation.OK() {
+		t.Fatalf("export package with raw media fields should validate: %#v", validation)
+	}
+}
+
+func TestExportReportsRequiredMediaDetailReadFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.9.5.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("ParentId") == "lib-movies":
+			writeExporterJSON(t, w, map[string]any{
+				"Items":            []map[string]any{{"Id": "item-detail-fails", "Name": "Detail Fails", "Type": "Movie", "Path": `D:\Movies\Detail Fails.mkv`}},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "item-detail-fails":
+			http.Error(w, "detail endpoint unavailable", http.StatusInternalServerError)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(t.TempDir())
+	j := job.NewManager().Create("export")
+	j.Start()
+	result, err := service.Export(context.Background(), j, ExportRequest{
+		Connection: emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries:  []emby.Library{{ID: "lib-movies", Name: "Movies"}},
+		SkipImages: true, IncludeMediaInfo: true,
+	})
+	if err != nil {
+		t.Fatalf("Export should finish with a structured item error: %v", err)
+	}
+	if len(result.Manifest.Items) != 0 || result.Manifest.Summary.Errors != 1 || len(result.Manifest.Errors) != 1 {
+		t.Fatalf("detail failure should not create an empty media item: %#v", result.Manifest)
+	}
+	if !strings.Contains(result.Manifest.Errors[0].Message, "read media technical details") {
+		t.Fatalf("detail failure diagnostic is unclear: %#v", result.Manifest.Errors[0])
+	}
+}
+
+func TestExportDisabledOmitsMediaTechnicalFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.8.11.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			item := rawItemWithMediaTechnicalFieldsFixture()
+			item["People"] = []map[string]any{{"Name": "Actor One", "Type": "Actor"}}
+			item["ImageTags"] = map[string]string{"Primary": "poster"}
+			writeExporterJSON(t, w, map[string]any{"Items": []map[string]any{item}, "TotalRecordCount": 1})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	service := NewService(t.TempDir())
+	j := job.NewManager().Create("export")
+	j.Start()
+	result, err := service.Export(context.Background(), j, ExportRequest{
+		Connection: emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries:  []emby.Library{{ID: "lib", Name: "Movies"}},
+		SkipImages: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := result.Manifest.Items[0]
+	if entry.MediaInfo != nil || result.Manifest.Summary.ItemsWithMediaInfo != 0 {
+		t.Fatalf("disabled export should omit manifest media info: %#v", result.Manifest)
+	}
+	var raw map[string]any
+	if err := storage.ReadJSON(filepath.Join(result.Path, filepath.FromSlash(entry.RawPath)), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"MediaSources", "MediaStreams", "Chapters"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("disabled export raw leaked %s: %#v", key, raw)
+		}
+	}
+}
+
+func TestMediaInfoDetailCompletenessAndRawMerge(t *testing.T) {
+	partial := emby.Item{
+		ID: "movie", Type: "Movie",
+		MediaSources: []map[string]any{{"Container": "mkv"}},
+		People:       []emby.Person{{Name: "Actor"}},
+		ImageTags:    map[string]string{"Primary": "poster"},
+	}
+	if !needsExportItemDetails(partial, true) {
+		t.Fatalf("a playable item without streams must fetch details")
+	}
+	partial.MediaSources[0]["MediaStreams"] = []map[string]any{{"Index": 0, "Type": "Video", "Codec": "hevc"}}
+	if !needsExportItemDetails(partial, true) {
+		t.Fatalf("an omitted Chapters field must fetch details")
+	}
+	partial.Raw = map[string]any{"Chapters": []map[string]any{}}
+	if needsExportItemDetails(partial, true) {
+		t.Fatalf("nested source streams plus an explicit Chapters field should satisfy media detail completeness")
+	}
+
+	base := emby.Item{MediaSources: partial.MediaSources, Raw: map[string]any{"MediaSources": partial.MediaSources}}
+	full := emby.Item{ID: "movie", Type: "Movie", Raw: map[string]any{"Id": "movie", "Type": "Movie"}}
+	merged := mergeExportItemDetails(base, full)
+	if len(merged.MediaSources) != 1 || len(objectSliceField(merged.Raw, "MediaSources")) != 1 {
+		t.Fatalf("merged structured fields and raw payload diverged: %#v", merged)
+	}
+}
+
+func TestMediaInfoSummaryIncludesUniqueStreamsAcrossAllSources(t *testing.T) {
+	shared := map[string]any{"Index": 0, "Type": "Video", "Codec": "hevc"}
+	second := map[string]any{"Index": 1, "Type": "Audio", "Codec": "aac"}
+	item := emby.Item{
+		MediaStreams: []map[string]any{shared},
+		MediaSources: []map[string]any{
+			{"Container": "mkv", "MediaStreams": []map[string]any{shared}},
+			{"Container": "mkv", "MediaStreams": []map[string]any{second}},
+		},
+	}
+	info := mediaInfoFromItem(item)
+	if info == nil || info.SourcesCount != 2 || info.StreamsCount != 2 {
+		t.Fatalf("media info summary should count unique streams from every source: %#v", info)
+	}
+}
+
+func TestItemFingerprintChangesWhenMediaTechnicalInfoChanges(t *testing.T) {
+	base := emby.Item{
+		ID:   "item-1",
+		Name: "Movie",
+		Type: "Movie",
+		MediaStreams: []map[string]any{
+			{"Index": 0, "Type": "Video", "Codec": "h264", "Width": 1920},
+		},
+	}
+	changed := base
+	changed.MediaStreams = []map[string]any{
+		{"Index": 0, "Type": "Video", "Codec": "hevc", "Width": 1920},
+	}
+	if itemFingerprint(base) == itemFingerprint(changed) {
+		t.Fatalf("fingerprint should change when media technical info changes")
+	}
+}
+
 func TestIncrementalExportSkipsUnchangedItems(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -658,15 +953,15 @@ func TestIncrementalExportSkipsUnchangedItems(t *testing.T) {
 				},
 				"TotalRecordCount": 1,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1":
-			writeExporterJSON(t, w, map[string]any{
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "item-1":
+			writeExporterJSON(t, w, map[string]any{"Items": []map[string]any{{
 				"Id":          "item-1",
 				"Name":        "Movie",
 				"Type":        "Movie",
 				"Path":        `D:\Movies\Movie.mkv`,
 				"ProviderIds": map[string]string{"Tmdb": "123"},
 				"ImageTags":   map[string]string{"Primary": "poster-tag"},
-			})
+			}}, "TotalRecordCount": 1})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images":
 			writeExporterJSON(t, w, []map[string]any{})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-1/Images/Primary":
@@ -1128,6 +1423,459 @@ func TestMergeItemMetadataBuildsPortablePayloadWithoutOldInternalIDs(t *testing.
 	if _, ok := studios[0]["Id"]; ok {
 		t.Fatalf("payload leaked old studio id: %#v", studios[0])
 	}
+}
+
+func TestMergeItemMetadataIncludesSanitizedMediaTechnicalFields(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	rawRel := filepath.ToSlash(filepath.Join("items", "movie", "raw.json"))
+	raw := rawItemWithMediaTechnicalFieldsFixture()
+	raw["Id"] = "source-item-id"
+	raw["ServerId"] = "source-server"
+	sources := raw["MediaSources"].([]map[string]any)
+	sources[0]["ServerId"] = "source-server"
+	sources[0]["MediaSourceId"] = "source-1"
+	streams := raw["MediaStreams"].([]map[string]any)
+	streams[0]["MediaSourceId"] = "source-1"
+	streams[0]["Path"] = `D:\Movies\Raw Media Fixture.mkv`
+	streams[0]["DeliveryUrl"] = "http://source-server/stream"
+	streams[0]["UnknownFutureField"] = "read-only"
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{
+			Name: "Raw Media Fixture",
+			Type: "Movie",
+			Raw:  raw,
+		},
+	}); err != nil {
+		t.Fatalf("WriteJSON info returned error: %v", err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rawRel)), raw); err != nil {
+		t.Fatalf("WriteJSON raw returned error: %v", err)
+	}
+
+	current := emby.Item{
+		ID:   "target-id",
+		Type: "Movie",
+		Name: "Target Movie",
+		Raw:  map[string]any{"Source": "Library", "ParentId": "target-parent"},
+	}
+	included := mergeItemMetadata(&current, storage.ItemEntry{Name: "Raw Media Fixture", InfoPath: infoRel, RawPath: rawRel}, exportPath, true)
+	if !included {
+		t.Fatalf("mergeItemMetadata should include media technical fields")
+	}
+	if current.Raw["Id"] != "target-id" || current.Raw["ParentId"] != "target-parent" {
+		t.Fatalf("payload should preserve target context, got %#v", current.Raw)
+	}
+	sanitizedSources, ok := current.Raw["MediaSources"].([]map[string]any)
+	if !ok || len(sanitizedSources) != 1 {
+		t.Fatalf("payload MediaSources = %#v, want one sanitized source", current.Raw["MediaSources"])
+	}
+	if sanitizedSources[0]["Protocol"] != "File" || sanitizedSources[0]["Container"] != "mkv" {
+		t.Fatalf("sanitized source lost technical fields: %#v", sanitizedSources[0])
+	}
+	for _, forbidden := range []string{"Id", "Path", "ServerId", "MediaSourceId"} {
+		if _, ok := sanitizedSources[0][forbidden]; ok {
+			t.Fatalf("sanitized source leaked %s: %#v", forbidden, sanitizedSources[0])
+		}
+	}
+	sanitizedStreams, ok := current.Raw["MediaStreams"].([]map[string]any)
+	if !ok || len(sanitizedStreams) != 2 {
+		t.Fatalf("payload MediaStreams = %#v, want two sanitized streams", current.Raw["MediaStreams"])
+	}
+	if sanitizedStreams[0]["Codec"] != "hevc" || sanitizedStreams[0]["Width"] == nil {
+		t.Fatalf("sanitized stream lost technical fields: %#v", sanitizedStreams[0])
+	}
+	if _, ok := sanitizedStreams[0]["DeliveryUrl"]; ok {
+		t.Fatalf("sanitized stream leaked DeliveryUrl: %#v", sanitizedStreams[0])
+	}
+	if _, ok := sanitizedStreams[0]["UnknownFutureField"]; ok {
+		t.Fatalf("sanitized stream kept an unknown field: %#v", sanitizedStreams[0])
+	}
+	sanitizedChapters, ok := current.Raw["Chapters"].([]map[string]any)
+	if !ok || len(sanitizedChapters) != 1 || sanitizedChapters[0]["Name"] != "Intro" {
+		t.Fatalf("payload Chapters = %#v, want one sanitized chapter", current.Raw["Chapters"])
+	}
+	if _, ok := sanitizedChapters[0]["Id"]; ok {
+		t.Fatalf("sanitized chapter leaked source id: %#v", sanitizedChapters[0])
+	}
+	payloadJSON, _ := json.Marshal(current.Raw)
+	for _, forbidden := range []string{"source-item-id", "source-server", `D:\\Movies\\Raw Media Fixture.mkv`, "source-1", "source-chapter"} {
+		if strings.Contains(string(payloadJSON), forbidden) {
+			t.Fatalf("payload leaked source-bound value %q: %s", forbidden, payloadJSON)
+		}
+	}
+}
+
+func TestImportItemFallsBackAfterMediaTechnicalPayload400AndStillUpdates(t *testing.T) {
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	rawRel := filepath.ToSlash(filepath.Join("items", "movie", "raw.json"))
+	raw := rawItemWithMediaTechnicalFieldsFixture()
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{Name: "Raw Media Fixture", Type: "Movie", Raw: raw},
+	}); err != nil {
+		t.Fatalf("WriteJSON info returned error: %v", err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rawRel)), raw); err != nil {
+		t.Fatalf("WriteJSON raw returned error: %v", err)
+	}
+
+	mediaPayloadAttempts := 0
+	degradedAttempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, map[string]any{
+				"Items": []map[string]any{
+					{"Id": "target-id", "Type": "Movie", "Name": "Raw Media Fixture", "Source": "Library"},
+				},
+				"TotalRecordCount": 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode request body: %v", err)
+			}
+			if _, hasMediaSources := body["MediaSources"]; hasMediaSources {
+				mediaPayloadAttempts++
+				http.Error(w, "MediaSources is read-only", http.StatusBadRequest)
+				return
+			}
+			if _, hasMediaStreams := body["MediaStreams"]; hasMediaStreams {
+				mediaPayloadAttempts++
+				http.Error(w, "MediaStreams is read-only", http.StatusBadRequest)
+				return
+			}
+			degradedAttempts++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name:     "Raw Media Fixture",
+		Type:     "Movie",
+		InfoPath: infoRel,
+		RawPath:  rawRel,
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http"})
+	if match.Status != "updated" || match.Error != "" {
+		t.Fatalf("media info fallback should still update metadata, got %#v", match)
+	}
+	if match.MediaInfoUpdated != 0 || match.MediaInfoFailed != 1 || !match.MediaInfoDegraded || match.MediaInfoError == "" {
+		t.Fatalf("media info degradation should be reported, got %#v", match)
+	}
+	if mediaPayloadAttempts != 1 || degradedAttempts != 1 {
+		t.Fatalf("unexpected attempts with media=%d degraded=%d", mediaPayloadAttempts, degradedAttempts)
+	}
+}
+
+func TestImportItemVerifiesPersistedMediaTechnicalFields(t *testing.T) {
+	exportPath, infoRel, rawRel := writeMediaInfoImportFixture(t)
+	var stored map[string]any
+	detailReads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "target-id":
+			detailReads++
+			if stored == nil {
+				writeExporterJSON(t, w, detailItemsResponse(map[string]any{"Id": "target-id", "Type": "Movie", "Name": "Raw Media Fixture", "Source": "Library"}))
+				return
+			}
+			writeExporterJSON(t, w, detailItemsResponse(stored))
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, mediaInfoTargetSearchResponse())
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			if err := json.NewDecoder(r.Body).Decode(&stored); err != nil {
+				t.Fatalf("failed to decode update body: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	if match.Status != "updated" || match.MediaInfoUpdated != 1 || match.MediaInfoFailed != 0 {
+		t.Fatalf("persisted media info should verify successfully: %#v", match)
+	}
+	if detailReads != 2 {
+		t.Fatalf("detail reads = %d, want before and after write", detailReads)
+	}
+}
+
+func TestImportDisabledNeverPostsMediaTechnicalFields(t *testing.T) {
+	exportPath, infoRel, rawRel := writeMediaInfoImportFixture(t)
+	var posted map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, mediaInfoTargetSearchResponse())
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+				t.Fatal(err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTPClient = server.Client()
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
+	}, ImportRequest{SkipImages: true})
+	if match.Status != "updated" {
+		t.Fatalf("metadata-only import failed: %#v", match)
+	}
+	for _, key := range []string{"MediaSources", "MediaStreams", "Chapters"} {
+		if _, ok := posted[key]; ok {
+			t.Fatalf("disabled import posted %s: %#v", key, posted)
+		}
+	}
+}
+
+func TestImportItemReportsSilentMediaInfoDropInsteadOfFalseSuccess(t *testing.T) {
+	exportPath, infoRel, rawRel := writeMediaInfoImportFixture(t)
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "target-id":
+			writeExporterJSON(t, w, detailItemsResponse(map[string]any{"Id": "target-id", "Type": "Movie", "Name": "Raw Media Fixture", "Source": "Library"}))
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, mediaInfoTargetSearchResponse())
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			posts++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	if match.Status != "updated" || match.MediaInfoUpdated != 0 || match.MediaInfoFailed != 1 || !match.MediaInfoDegraded {
+		t.Fatalf("silent drop should be reported as degraded, not success: %#v", match)
+	}
+	if posts != 1 || match.MediaInfoError == "" {
+		t.Fatalf("silent drop diagnostics missing: posts=%d match=%#v", posts, match)
+	}
+}
+
+func TestImportItemDoesNotOverwriteCompleteTargetMediaInfo(t *testing.T) {
+	exportPath, infoRel, rawRel := writeMediaInfoImportFixture(t)
+	var posted map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "target-id":
+			target := rawItemWithMediaTechnicalFieldsFixture()
+			target["Id"] = "target-id"
+			target["Path"] = `E:\Target\Raw Media Fixture.mkv`
+			writeExporterJSON(t, w, detailItemsResponse(target))
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, mediaInfoTargetSearchResponse())
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+				t.Fatal(err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	if match.Status != "updated" || match.MediaInfoSkipped != 1 || match.MediaInfoUpdated != 0 {
+		t.Fatalf("complete target media info should be preserved: %#v", match)
+	}
+	for _, key := range []string{"MediaSources", "MediaStreams", "Chapters"} {
+		if _, ok := posted[key]; ok {
+			t.Fatalf("metadata-only update leaked %s into complete target: %#v", key, posted)
+		}
+	}
+}
+
+func TestImportItemDoesNotWriteMediaInfoWhenTargetDetailUnavailable(t *testing.T) {
+	exportPath, infoRel, rawRel := writeMediaInfoImportFixture(t)
+	var posted map[string]any
+	detailReads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "target-id":
+			detailReads++
+			http.Error(w, "target detail unavailable", http.StatusInternalServerError)
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, mediaInfoTargetSearchResponse())
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+				t.Fatal(err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	if match.Status != "updated" || match.MediaInfoFailed != 1 || !match.MediaInfoDegraded || match.MediaInfoError == "" {
+		t.Fatalf("unreadable target media info should degrade safely: %#v", match)
+	}
+	if detailReads != importRetryAttempts {
+		t.Fatalf("detail reads = %d, want %d retries", detailReads, importRetryAttempts)
+	}
+	for _, key := range []string{"MediaSources", "MediaStreams", "Chapters"} {
+		if _, ok := posted[key]; ok {
+			t.Fatalf("unreadable target detail must not post %s: %#v", key, posted)
+		}
+	}
+}
+
+func TestMediaInfoVerificationRequiresDistinctArrayMatches(t *testing.T) {
+	actual := map[string]any{
+		"MediaStreams": []map[string]any{{"Type": "Video", "Codec": "h264"}},
+	}
+	expected := map[string]any{
+		"MediaStreams": []map[string]any{
+			{"Type": "Video", "Codec": "h264"},
+			{"Type": "Video", "Codec": "h264"},
+		},
+	}
+	if mediaInfoPayloadContains(actual, expected) {
+		t.Fatalf("one actual stream must not satisfy two expected streams")
+	}
+}
+
+func TestDatabaseMediaInfoModeAndVersionGuard(t *testing.T) {
+	if !databaseMediaInfoEnabled(ImportRequest{ImportMediaInfo: true}) {
+		t.Fatalf("database mode should be the default when media info is enabled")
+	}
+	if databaseMediaInfoEnabled(ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http"}) {
+		t.Fatalf("legacy HTTP regression mode must not generate a database plan")
+	}
+	for _, versions := range [][2]string{{"4.8.11.0", "4.8.11.0"}, {"4.9.5.0", "4.9.5.1"}} {
+		if !sameEmbyMinorSeries(versions[0], versions[1]) {
+			t.Fatalf("same version series should be accepted: %#v", versions)
+		}
+	}
+	if sameEmbyMinorSeries("4.8.11.0", "4.9.5.0") {
+		t.Fatalf("cross-version media database restore must be rejected")
+	}
+	if sameEmbyMinorSeries("4.8.10.0", "4.8.11.0") {
+		t.Fatalf("untested 4.8 database schemas must be rejected")
+	}
+}
+
+func TestImportItemFallsBackAfterMediaTechnicalPayload500(t *testing.T) {
+	exportPath, infoRel, rawRel := writeMediaInfoImportFixture(t)
+	mediaAttempts := 0
+	metadataAttempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("Ids") == "target-id":
+			writeExporterJSON(t, w, detailItemsResponse(map[string]any{"Id": "target-id", "Type": "Movie", "Name": "Raw Media Fixture", "Source": "Library"}))
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, mediaInfoTargetSearchResponse())
+		case r.Method == http.MethodPost && r.URL.Path == "/Items/target-id":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := body["MediaSources"]; ok {
+				mediaAttempts++
+				http.Error(w, "temporary media payload failure", http.StatusInternalServerError)
+				return
+			}
+			metadataAttempts++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := emby.NewClient(server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTPClient = server.Client()
+
+	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
+		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	if match.Status != "updated" || match.MediaInfoFailed != 1 || match.Error != "" {
+		t.Fatalf("HTTP 500 media payload should degrade to metadata-only update: %#v", match)
+	}
+	if mediaAttempts != importRetryAttempts || metadataAttempts != 1 {
+		t.Fatalf("attempts media=%d metadata=%d, want %d/1", mediaAttempts, metadataAttempts, importRetryAttempts)
+	}
+}
+
+func writeMediaInfoImportFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	exportPath := t.TempDir()
+	infoRel := filepath.ToSlash(filepath.Join("items", "movie", "info.json"))
+	rawRel := filepath.ToSlash(filepath.Join("items", "movie", "raw.json"))
+	raw := rawItemWithMediaTechnicalFieldsFixture()
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(infoRel)), storage.ItemInfo{
+		Item: emby.Item{Name: "Raw Media Fixture", Type: "Movie", Raw: raw},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportPath, filepath.FromSlash(rawRel)), raw); err != nil {
+		t.Fatal(err)
+	}
+	return exportPath, infoRel, rawRel
+}
+
+func mediaInfoTargetSearchResponse() map[string]any {
+	return map[string]any{
+		"Items":            []map[string]any{{"Id": "target-id", "Type": "Movie", "Name": "Raw Media Fixture", "Source": "Library"}},
+		"TotalRecordCount": 1,
+	}
+}
+
+func detailItemsResponse(item map[string]any) map[string]any {
+	return map[string]any{"Items": []map[string]any{item}, "TotalRecordCount": 1}
 }
 
 func TestImportItemStillUploadsImagesWhenMetadataUpdateFails(t *testing.T) {
@@ -1855,6 +2603,101 @@ func newFindMatchTestClient(t *testing.T, handler http.HandlerFunc) *emby.Client
 	}
 	client.HTTPClient = server.Client()
 	return client
+}
+
+func rawItemWithMediaTechnicalFieldsFixture() map[string]any {
+	videoStream := map[string]any{
+		"Index": 0,
+		"Type":  "Video",
+		"Codec": "hevc",
+		"Width": 3840,
+	}
+	audioStream := map[string]any{
+		"Index":    1,
+		"Type":     "Audio",
+		"Codec":    "aac",
+		"Language": "jpn",
+	}
+	return map[string]any{
+		"Id":          "item-raw-media",
+		"Name":        "Raw Media Fixture",
+		"Type":        "Movie",
+		"Path":        `D:\Movies\Raw Media Fixture.mkv`,
+		"ProviderIds": map[string]string{"Tmdb": "987654"},
+		"MediaSources": []map[string]any{
+			{
+				"Id":        "source-1",
+				"Path":      `D:\Movies\Raw Media Fixture.mkv`,
+				"Protocol":  "File",
+				"Container": "mkv",
+				"MediaStreams": []map[string]any{
+					videoStream,
+					audioStream,
+				},
+			},
+		},
+		"MediaStreams": []map[string]any{
+			videoStream,
+			audioStream,
+		},
+		"Chapters": []map[string]any{
+			{"StartPositionTicks": 0, "Name": "Intro", "Id": "source-chapter", "ImagePath": `D:\Movies\chapter.jpg`},
+		},
+	}
+}
+
+func assertRawMediaTechnicalFields(t *testing.T, raw map[string]any) {
+	t.Helper()
+	sources, ok := raw["MediaSources"].([]any)
+	if !ok || len(sources) != 1 {
+		t.Fatalf("Raw.MediaSources = %#v, want one media source", raw["MediaSources"])
+	}
+	source, ok := sources[0].(map[string]any)
+	if !ok {
+		t.Fatalf("Raw.MediaSources[0] = %#v, want object", sources[0])
+	}
+	if source["Id"] != "source-1" || source["Protocol"] != "File" || source["Container"] != "mkv" {
+		t.Fatalf("Raw.MediaSources[0] lost scalar fields: %#v", source)
+	}
+	nestedStreams, ok := source["MediaStreams"].([]any)
+	if !ok || len(nestedStreams) != 2 {
+		t.Fatalf("Raw.MediaSources[0].MediaStreams = %#v, want two streams", source["MediaStreams"])
+	}
+
+	streams, ok := raw["MediaStreams"].([]any)
+	if !ok || len(streams) != 2 {
+		t.Fatalf("Raw.MediaStreams = %#v, want two streams", raw["MediaStreams"])
+	}
+	video, ok := streams[0].(map[string]any)
+	if !ok {
+		t.Fatalf("Raw.MediaStreams[0] = %#v, want object", streams[0])
+	}
+	audio, ok := streams[1].(map[string]any)
+	if !ok {
+		t.Fatalf("Raw.MediaStreams[1] = %#v, want object", streams[1])
+	}
+	if video["Type"] != "Video" || video["Codec"] != "hevc" {
+		t.Fatalf("Raw.MediaStreams[0] lost video stream fields: %#v", video)
+	}
+	if audio["Type"] != "Audio" || audio["Codec"] != "aac" || audio["Language"] != "jpn" {
+		t.Fatalf("Raw.MediaStreams[1] lost audio stream fields: %#v", audio)
+	}
+	chapters, ok := raw["Chapters"].([]any)
+	if !ok || len(chapters) != 1 {
+		t.Fatalf("Raw.Chapters = %#v, want one chapter", raw["Chapters"])
+	}
+}
+
+func rawPayloadFromItemInfo(t *testing.T, info storage.ItemInfo) map[string]any {
+	t.Helper()
+	if _, ok := info.Item.Raw["MediaSources"]; ok {
+		return info.Item.Raw
+	}
+	raw, ok := info.Item.Raw["Raw"].(map[string]any)
+	if !ok {
+		t.Fatalf("ItemInfo.Item.Raw did not preserve nested raw payload: %#v", info.Item.Raw)
+	}
+	return raw
 }
 
 func writeExporterJSON(t *testing.T, w http.ResponseWriter, payload any) {

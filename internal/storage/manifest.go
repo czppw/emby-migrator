@@ -51,6 +51,7 @@ type ManifestItem struct {
 	Name        string
 	Path        string
 	ProviderIDs map[string]string
+	MediaInfo   *MediaInfo
 	Images      []ManifestImage
 }
 
@@ -124,6 +125,7 @@ type ItemEntry struct {
 	RawPath           string            `json:"rawPath"`
 	Images            []FileEntry       `json:"images,omitempty"`
 	People            []string          `json:"people,omitempty"`
+	MediaInfo         *MediaInfo        `json:"mediaInfo,omitempty"`
 }
 
 type PersonEntry struct {
@@ -159,6 +161,14 @@ type Summary struct {
 	ItemImages         int `json:"itemImages"`
 	PeopleImages       int `json:"peopleImages"`
 	Errors             int `json:"errors"`
+	ItemsWithMediaInfo int `json:"itemsWithMediaInfo,omitempty"`
+	MediaSources       int `json:"mediaSources,omitempty"`
+	MediaStreams       int `json:"mediaStreams,omitempty"`
+	Chapters           int `json:"chapters,omitempty"`
+	MediaInfoUpdated   int `json:"mediaInfoUpdated,omitempty"`
+	MediaInfoFailed    int `json:"mediaInfoFailed,omitempty"`
+	MediaInfoSkipped   int `json:"mediaInfoSkipped,omitempty"`
+	MediaInfoPlanned   int `json:"mediaInfoPlanned,omitempty"`
 	SkippedItems       int `json:"skippedItems,omitempty"`
 	Matched            int `json:"matched,omitempty"`
 	Unmatched          int `json:"unmatched,omitempty"`
@@ -169,12 +179,23 @@ type Summary struct {
 	PeopleImagesFailed int `json:"peopleImagesFailed,omitempty"`
 }
 
+type MediaInfo struct {
+	SourcesCount  int    `json:"sourcesCount,omitempty"`
+	StreamsCount  int    `json:"streamsCount,omitempty"`
+	ChaptersCount int    `json:"chaptersCount,omitempty"`
+	SourcesHash   string `json:"sourcesHash,omitempty"`
+	StreamsHash   string `json:"streamsHash,omitempty"`
+	ChaptersHash  string `json:"chaptersHash,omitempty"`
+	Hash          string `json:"hash,omitempty"`
+}
+
 type ItemInfo struct {
 	Item       emby.Item     `json:"item"`
 	StableKey  string        `json:"stableKey"`
 	ExportedAt time.Time     `json:"exportedAt"`
 	Images     []FileEntry   `json:"images,omitempty"`
 	People     []emby.Person `json:"people,omitempty"`
+	MediaInfo  *MediaInfo    `json:"mediaInfo,omitempty"`
 }
 
 func StableItemKey(value any) string {
@@ -186,6 +207,46 @@ func StableItemKey(value any) string {
 	default:
 		return "unknown"
 	}
+}
+
+func MediaInfoFromItem(item emby.Item) *MediaInfo {
+	return NewMediaInfo(item.MediaSources, item.MediaStreams, item.Chapters)
+}
+
+func NewMediaInfo(sources, streams, chapters []map[string]any) *MediaInfo {
+	info := &MediaInfo{
+		SourcesCount:  len(sources),
+		StreamsCount:  len(streams),
+		ChaptersCount: len(chapters),
+		SourcesHash:   hashJSONSlice(sources),
+		StreamsHash:   hashJSONSlice(streams),
+		ChaptersHash:  hashJSONSlice(chapters),
+	}
+	if info.SourcesCount == 0 && info.StreamsCount == 0 && info.ChaptersCount == 0 {
+		return nil
+	}
+	info.Hash = hashJSONValue(map[string]any{
+		"sources":  sources,
+		"streams":  streams,
+		"chapters": chapters,
+	})
+	return info
+}
+
+func hashJSONSlice(values []map[string]any) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return hashJSONValue(values)
+}
+
+func hashJSONValue(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func stableEmbyItemKey(item emby.Item) string {
@@ -366,6 +427,7 @@ func BuildManifest(input ManifestInput) (Manifest, error) {
 			Name:        item.Name,
 			Path:        item.Path,
 			ProviderIDs: item.ProviderIDs,
+			MediaInfo:   item.MediaInfo,
 		}
 		for _, image := range item.Images {
 			entry.Images = append(entry.Images, FileEntry{Type: image.Type, Path: image.File, Size: image.Size, SHA256: image.SHA256})
@@ -386,6 +448,15 @@ func BuildManifest(input ManifestInput) (Manifest, error) {
 	manifest.Summary.Items = len(manifest.Items)
 	manifest.Summary.People = len(manifest.People)
 	manifest.Summary.Errors = len(manifest.Errors)
+	for _, item := range manifest.Items {
+		if item.MediaInfo == nil {
+			continue
+		}
+		manifest.Summary.ItemsWithMediaInfo++
+		manifest.Summary.MediaSources += item.MediaInfo.SourcesCount
+		manifest.Summary.MediaStreams += item.MediaInfo.StreamsCount
+		manifest.Summary.Chapters += item.MediaInfo.ChaptersCount
+	}
 	return manifest, nil
 }
 

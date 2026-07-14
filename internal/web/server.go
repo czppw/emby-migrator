@@ -22,6 +22,7 @@ type Server struct {
 	sessionSecret         []byte
 	usersCache            cachedUsersConfig
 	telegramNotifications sync.Map
+	docker                dockerController
 }
 
 type connectionRequest struct {
@@ -53,6 +54,7 @@ type exportRequest struct {
 	Concurrency         int            `json:"concurrency"`
 	SkipImages          bool           `json:"skipImages"`
 	IncludePeopleImages bool           `json:"includePeopleImages"`
+	IncludeMediaInfo    *bool          `json:"includeMediaInfo"`
 	Incremental         bool           `json:"incremental"`
 	Overwrite           bool           `json:"overwrite"`
 	ImageTypes          []string       `json:"imageTypes"`
@@ -70,13 +72,29 @@ type importRequest struct {
 	DryRun              bool     `json:"dryRun"`
 	SkipImages          bool     `json:"skipImages"`
 	IncludePeopleImages bool     `json:"includePeopleImages"`
+	ImportMediaInfo     *bool    `json:"importMediaInfo"`
+	MediaInfoMode       string   `json:"mediaInfoMode"`
 	Overwrite           bool     `json:"overwrite"`
 	Resume              bool     `json:"resume"`
 	ImageTypes          []string `json:"imageTypes"`
 }
 
+type mediaDatabaseApplyRequest struct {
+	ExportPath          string `json:"exportPath"`
+	DatabasePath        string `json:"databasePath"`
+	TargetProfileID     string `json:"targetProfileId"`
+	AutoManageContainer *bool  `json:"autoManageContainer"`
+	Overwrite           bool   `json:"overwrite"`
+}
+
 func NewServer(cfg config.Config, jobs *job.Manager, exporter *exporter.Service) *Server {
-	return &Server{cfg: cfg, jobs: jobs, exporter: exporter, sessionSecret: makeSessionSecret(cfg.SessionSecret)}
+	return &Server{
+		cfg:           cfg,
+		jobs:          jobs,
+		exporter:      exporter,
+		sessionSecret: makeSessionSecret(cfg.SessionSecret),
+		docker:        newDockerController(cfg.DockerHost),
+	}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -95,6 +113,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("DELETE /api/settings/profiles/{id}", s.requireRole(roleAdmin, http.HandlerFunc(s.handleAppProfileDelete)))
 	mux.Handle("POST /api/settings/profiles/select", s.requireRole(roleAdmin, http.HandlerFunc(s.handleAppProfileSelect)))
 	mux.Handle("GET /api/exports", s.requireRole(roleViewer, http.HandlerFunc(s.handleExports)))
+	mux.Handle("GET /api/emby-databases", s.requireRole(roleViewer, http.HandlerFunc(s.handleEmbyDatabaseDiscovery)))
 	mux.Handle("GET /api/import-reports", s.requireRole(roleViewer, http.HandlerFunc(s.handleImportReports)))
 	mux.Handle("GET /api/import-reports/download", s.requireRole(roleViewer, http.HandlerFunc(s.handleImportReportDownload)))
 	mux.Handle("GET /api/settings/telegram", s.requireRole(roleViewer, http.HandlerFunc(s.handleTelegramSettingsGet)))
@@ -105,6 +124,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /api/jobs/export", s.requireRole(roleOperator, http.HandlerFunc(s.handleExportJob)))
 	mux.Handle("POST /api/jobs/import", s.requireRole(roleOperator, http.HandlerFunc(s.handleImportJob)))
 	mux.Handle("POST /api/jobs/import/precheck", s.requireRole(roleOperator, http.HandlerFunc(s.handleImportPrecheckJob)))
+	mux.Handle("POST /api/jobs/media-info/apply", s.requireRole(roleOperator, http.HandlerFunc(s.handleMediaDatabaseApplyJob)))
 	mux.Handle("GET /api/jobs", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobs)))
 	mux.Handle("GET /api/jobs/{id}", s.requireRole(roleViewer, http.HandlerFunc(s.handleJob)))
 	mux.Handle("POST /api/jobs/{id}/pause", s.requireRole(roleOperator, http.HandlerFunc(s.handlePauseJob)))
@@ -223,7 +243,7 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 	j := s.jobs.Enqueue("export", func(j *job.Job) {
 		defer s.notifyTelegramJobTerminal(j)
 		j.Log("info", "开始导出任务")
-		result, err := s.exporter.Export(j.Context(), j, exporter.ExportRequest{
+		exportReq := exporter.ExportRequest{
 			Connection:          connection,
 			Libraries:           req.Libraries,
 			LibraryIDs:          req.LibraryIDs,
@@ -234,7 +254,9 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 			Overwrite:           req.Overwrite,
 			ImageTypes:          req.ImageTypes,
 			ToolVersion:         s.cfg.Version,
-		})
+			IncludeMediaInfo:    req.mediaInfoEnabled(),
+		}
+		result, err := s.exporter.Export(j.Context(), j, exportReq)
 		if err != nil {
 			j.Fail(err)
 			return
@@ -257,6 +279,88 @@ func (s *Server) handleImportJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImportPrecheckJob(w http.ResponseWriter, r *http.Request) {
 	s.startImportJob(w, r, true)
+}
+
+func (s *Server) handleMediaDatabaseApplyJob(w http.ResponseWriter, r *http.Request) {
+	var req mediaDatabaseApplyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ExportPath) == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath is required"))
+		return
+	}
+	profile, err := s.mediaDatabaseTargetProfile(req.TargetProfileID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.AutoManageContainer != nil && *req.AutoManageContainer != profile.AutoManageContainer {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("自动停启设置尚未保存，请先保存目标服务器档案"))
+		return
+	}
+	databaseRequest := strings.TrimSpace(req.DatabasePath)
+	if databaseRequest == "" {
+		databaseRequest = profile.DatabasePath
+	}
+	databasePath, err := resolveEmbyDatabasePath(s.cfg.EmbyDatabaseRoot, databaseRequest)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	j := s.jobs.Enqueue("media-db-apply", func(j *job.Job) {
+		defer s.notifyTelegramJobTerminal(j)
+		j.Log("info", "开始媒体技术信息离线数据库写入任务")
+		result, err := s.applyMediaDatabaseJob(j, req.ExportPath, databasePath, req.Overwrite, profile)
+		if err != nil {
+			j.Fail(err)
+			return
+		}
+		j.Complete(result)
+	})
+	writeJSON(w, http.StatusAccepted, j.Snapshot())
+}
+
+func resolveEmbyDatabasePath(root, requested string) (string, error) {
+	root = strings.TrimSpace(root)
+	requested = strings.TrimSpace(requested)
+	if root == "" {
+		return "", fmt.Errorf("媒体数据库功能未启用：请设置 EMBY_MIGRATOR_EMBY_DB_ROOT 并挂载目标 Emby config 目录")
+	}
+	if requested == "" {
+		return "", fmt.Errorf("databasePath is required")
+	}
+	if filepath.IsAbs(requested) {
+		return "", fmt.Errorf("databasePath must be relative to EMBY_MIGRATOR_EMBY_DB_ROOT")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	targetAbs, err := filepath.Abs(filepath.Join(rootAbs, filepath.Clean(requested)))
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("databasePath escapes EMBY_MIGRATOR_EMBY_DB_ROOT")
+	}
+	if !strings.EqualFold(filepath.Base(targetAbs), "library.db") {
+		return "", fmt.Errorf("databasePath must point to library.db")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve database root: %w", err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(targetAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve database path: %w", err)
+	}
+	resolvedRelative, err := filepath.Rel(resolvedRoot, resolvedTarget)
+	if err != nil || resolvedRelative == ".." || strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("databasePath resolves outside EMBY_MIGRATOR_EMBY_DB_ROOT")
+	}
+	return resolvedTarget, nil
 }
 
 func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDryRun bool) {
@@ -289,7 +393,7 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 	j := s.jobs.Enqueue(jobType, func(j *job.Job) {
 		defer s.notifyTelegramJobTerminal(j)
 		j.Log("info", startMessage)
-		result, err := s.exporter.Import(j.Context(), j, exporter.ImportRequest{
+		importReq := exporter.ImportRequest{
 			Connection:          connection,
 			ExportPath:          filepath.Clean(req.ExportPath),
 			TargetLibraryIDs:    req.TargetLibraryIDs,
@@ -302,7 +406,10 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 			Resume:              req.Resume,
 			ImageTypes:          req.ImageTypes,
 			ToolVersion:         s.cfg.Version,
-		})
+			ImportMediaInfo:     req.mediaInfoEnabled(),
+			MediaInfoMode:       req.MediaInfoMode,
+		}
+		result, err := s.exporter.Import(j.Context(), j, importReq)
 		if err != nil {
 			j.Fail(err)
 			return
@@ -310,6 +417,21 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 		j.Complete(compactJobResult(result))
 	})
 	writeJSON(w, http.StatusAccepted, j.Snapshot())
+}
+
+func boolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func (r exportRequest) mediaInfoEnabled() bool {
+	return boolDefault(r.IncludeMediaInfo, false)
+}
+
+func (r importRequest) mediaInfoEnabled() bool {
+	return boolDefault(r.ImportMediaInfo, false)
 }
 
 func friendlyExportPathError(exportPath string, err error) error {

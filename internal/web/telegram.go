@@ -283,11 +283,11 @@ func (s *Server) notifyTelegramJobTerminal(j *job.Job) {
 	}
 	logs := j.Logs()
 	go func() {
-		_ = s.sendTelegramJobTerminalNotification(context.Background(), snapshot, logs)
+		_ = s.sendTelegramJobTerminalNotification(context.Background(), &snapshot, logs)
 	}()
 }
 
-func (s *Server) sendTelegramJobTerminalNotification(ctx context.Context, snapshot job.Job, logs []job.LogEntry) error {
+func (s *Server) sendTelegramJobTerminalNotification(ctx context.Context, snapshot *job.Job, logs []job.LogEntry) error {
 	settings, err := s.loadTelegramSettings()
 	if err != nil {
 		return err
@@ -303,7 +303,7 @@ func isTelegramTerminalStatus(status job.Status) bool {
 	return status == job.StatusDone || status == job.StatusFailed || status == job.StatusStopped
 }
 
-func formatTelegramJobNotification(snapshot job.Job, logs []job.LogEntry, version string) string {
+func formatTelegramJobNotification(snapshot *job.Job, logs []job.LogEntry, version string) string {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		version = "unknown"
@@ -426,7 +426,7 @@ func formatTelegramJobDuration(start, end time.Time) string {
 	return duration.Round(time.Second).String()
 }
 
-func telegramJobSummary(snapshot job.Job, logs []job.LogEntry) string {
+func telegramJobSummary(snapshot *job.Job, logs []job.LogEntry) string {
 	if summary := telegramResultSummary(snapshot.Result); summary != "" {
 		return summary
 	}

@@ -6,5 +6,6 @@
 server.exe*
 PROJECT_NOTES.md
 .codex-private/
+.codex-runtime/
 .gocache/
 .local-run/

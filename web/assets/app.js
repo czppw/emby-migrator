@@ -36,6 +36,7 @@
     export: "导出",
     import: "导入",
     "import-precheck": "导入预检",
+    "media-db-apply": "媒体信息写库",
   };
   const JOB_STATUS_LABELS = {
     queued: "排队中",
@@ -83,6 +84,9 @@
     profiles: [],
     currentSource: "",
     currentTarget: "",
+    discoveredDatabases: [],
+    databaseDiscoveryRequest: 0,
+    dockerAvailable: false,
     libraries: [],
     targetLibraries: [],
     libraryGroups: [],
@@ -153,6 +157,11 @@
       "serverUrl",
       "apiKey",
       "apiKeyHint",
+      "embyDatabasePath",
+      "embyDatabaseHint",
+      "refreshEmbyDatabasesBtn",
+      "embyContainerName",
+      "autoManageContainer",
       "rememberConnection",
       "sourceProfileSelect",
       "targetProfileSelect",
@@ -179,6 +188,7 @@
       "exportIncremental",
       "exportOverwrite",
       "exportIncludePeopleImages",
+      "exportIncludeMediaInfo",
       "exportConcurrency",
       "startExportBtn",
       "refreshJobsBtn",
@@ -197,9 +207,11 @@
       "importOverwrite",
       "importResume",
       "importIncludePeopleImages",
+      "importMediaInfo",
       "importConcurrency",
       "startPrecheckBtn",
       "startImportBtn",
+      "applyMediaDatabaseBtn",
       "importNotice",
       "importReport",
       "logSummary",
@@ -237,6 +249,7 @@
     els.exportsSelect.addEventListener("change", handleExportSelection);
     els.startPrecheckBtn.addEventListener("click", handleStartPrecheck);
     els.startImportBtn.addEventListener("click", handleStartImport);
+    els.applyMediaDatabaseBtn.addEventListener("click", handleApplyMediaDatabase);
     els.downloadLogsBtn.addEventListener("click", handleDownloadLogs);
     els.copyLogsBtn.addEventListener("click", handleCopyLogs);
     els.clearLogsBtn.addEventListener("click", () => {
@@ -249,6 +262,8 @@
     els.rememberConnection.addEventListener("change", handleRememberConnectionChanged);
     els.sourceProfileSelect.addEventListener("change", () => handleProfileSelectionChanged("source"));
     els.targetProfileSelect.addEventListener("change", () => handleProfileSelectionChanged("target"));
+    els.refreshEmbyDatabasesBtn.addEventListener("click", () => loadEmbyDatabases());
+    els.embyDatabasePath.addEventListener("change", handleDatabaseSelectionChanged);
 
     [
       els.exportSkipImages,
@@ -259,7 +274,9 @@
       els.importResume,
       els.exportIncludePeopleImages,
       els.importIncludePeopleImages,
-    ].forEach((input) => input.addEventListener("change", handleTaskPreferenceChanged));
+      els.exportIncludeMediaInfo,
+      els.importMediaInfo,
+    ].filter(Boolean).forEach((input) => input.addEventListener("change", handleTaskPreferenceChanged));
     [els.exportConcurrency, els.importConcurrency].forEach((input) => {
       input.addEventListener("change", handleTaskPreferenceChanged);
       input.addEventListener("blur", handleTaskPreferenceChanged);
@@ -502,6 +519,7 @@
     try {
       const data = await fetchJson("/api/settings/app");
       renderAppSettings(data);
+      await loadEmbyDatabases({ quiet: true });
     } catch (error) {
       setNotice(els.connectionNotice, `读取保存配置失败：${error.message}`, "error");
     } finally {
@@ -532,6 +550,9 @@
       els.apiKey.value = "";
     }
     renderProfileSelects();
+    const activeProfile = findProfileByBaseUrl(baseUrl);
+    const targetProfile = findProfileById(state.currentTarget) || activeProfile;
+    applyDatabaseProfileSettings(targetProfile);
     refreshApiKeyHint();
 
     if (Boolean(readFirst(settings, ["configured", "Configured"]))) {
@@ -659,6 +680,143 @@
     return `${name} · ${baseUrl}`;
   }
 
+  function targetProfileId() {
+    return String(els.targetProfileSelect?.value || state.currentTarget || "").trim();
+  }
+
+  function applyDatabaseProfileSettings(profile) {
+    const databasePath = String(readFirst(profile, ["databasePath", "DatabasePath"]) || "").trim();
+    state.discoveredDatabases = [];
+    state.dockerAvailable = false;
+    renderDatabaseOptions([], databasePath, "请点击重新检测数据库。");
+    els.embyContainerName.value = String(
+      readFirst(profile, ["containerName", "ContainerName"]) || "",
+    ).trim();
+    els.autoManageContainer.checked = Boolean(
+      readFirst(profile, ["autoManageContainer", "AutoManageContainer"]),
+    );
+  }
+
+  async function loadEmbyDatabases({ quiet = false } = {}) {
+    const profileId = targetProfileId();
+    const requestId = ++state.databaseDiscoveryRequest;
+    if (!profileId) {
+      state.discoveredDatabases = [];
+      state.dockerAvailable = false;
+      renderDatabaseOptions([], els.embyDatabasePath.value, "请先选择并保存目标服务器。");
+      updateControls();
+      return;
+    }
+
+    setButtonBusy("refreshEmbyDatabases", els.refreshEmbyDatabasesBtn, true, "检测中");
+    if (!quiet) {
+      els.embyDatabaseHint.textContent = "正在检测目标服务器的数据库和容器...";
+    }
+    try {
+      const data = safeObject(
+        await fetchJson(`/api/emby-databases?profileId=${encodeURIComponent(profileId)}`),
+      );
+      if (requestId !== state.databaseDiscoveryRequest || profileId !== targetProfileId()) {
+        return;
+      }
+      const databases = Array.isArray(data.databases)
+        ? data.databases
+        : Array.isArray(data.Databases)
+          ? data.Databases
+          : [];
+      state.discoveredDatabases = databases
+        .map((database) => ({
+          path: String(readFirst(database, ["path", "Path"]) || "").trim(),
+          containerName: String(
+            readFirst(database, ["containerName", "ContainerName"]) || "",
+          ).trim(),
+          matched: Boolean(readFirst(database, ["matched", "Matched"])),
+        }))
+        .filter((database) => database.path);
+      state.dockerAvailable = Boolean(
+        readFirst(data, ["dockerAvailable", "DockerAvailable"]),
+      );
+      const selectedPath = String(
+        readFirst(data, ["selectedPath", "SelectedPath"]) || els.embyDatabasePath.value || "",
+      ).trim();
+      const count = state.discoveredDatabases.length;
+      const hint = state.dockerAvailable
+        ? count > 0
+          ? `已发现 ${count} 个数据库；选择后会同步容器名。`
+          : "未发现数据库。远程 Emby 需在其主机部署本项目，或把 config 挂载到 /emby-dbs。"
+        : count > 0
+          ? `已发现 ${count} 个数据库；Docker 不可用，无法自动停启容器。`
+          : "未发现数据库。当前只能扫描本机已挂载的 /emby-dbs，远程 Emby API 不包含数据库文件。";
+      renderDatabaseOptions(state.discoveredDatabases, selectedPath, hint);
+      syncContainerNameForSelectedDatabase();
+    } catch (error) {
+      if (requestId === state.databaseDiscoveryRequest) {
+        state.discoveredDatabases = [];
+        state.dockerAvailable = false;
+        renderDatabaseOptions(
+          [],
+          els.embyDatabasePath.value,
+          `数据库检测失败：${error.message}`,
+        );
+      }
+    } finally {
+      if (requestId === state.databaseDiscoveryRequest) {
+        setButtonBusy("refreshEmbyDatabases", els.refreshEmbyDatabasesBtn, false);
+        updateControls();
+      }
+    }
+  }
+
+  function renderDatabaseOptions(databases, selectedPath, hint) {
+    const select = els.embyDatabasePath;
+    const normalizedSelectedPath = String(selectedPath || "").trim();
+    select.textContent = "";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = databases.length > 0 ? "选择目标数据库" : "未发现可用数据库";
+    select.appendChild(placeholder);
+
+    const seen = new Set();
+    databases.forEach((database) => {
+      if (seen.has(database.path)) {
+        return;
+      }
+      seen.add(database.path);
+      const option = document.createElement("option");
+      option.value = database.path;
+      const container = database.containerName ? ` · ${database.containerName}` : "";
+      const matched = database.matched ? "（匹配目标服务器）" : "";
+      option.textContent = `${database.path}${container}${matched}`;
+      select.appendChild(option);
+    });
+
+    if (normalizedSelectedPath && !seen.has(normalizedSelectedPath)) {
+      const saved = document.createElement("option");
+      saved.value = normalizedSelectedPath;
+      saved.textContent = `${normalizedSelectedPath}（档案已保存）`;
+      select.appendChild(saved);
+    }
+    const matchedPath = databases.find((database) => database.matched)?.path || "";
+    const fallback = matchedPath || (databases.length === 1 ? databases[0].path : "");
+    select.value = normalizedSelectedPath || fallback;
+    els.embyDatabaseHint.textContent = hint;
+  }
+
+  function handleDatabaseSelectionChanged() {
+    syncContainerNameForSelectedDatabase();
+    updateControls();
+  }
+
+  function syncContainerNameForSelectedDatabase() {
+    const selected = state.discoveredDatabases.find(
+      (database) => database.path === els.embyDatabasePath.value,
+    );
+    if (selected?.containerName) {
+      els.embyContainerName.value = selected.containerName;
+    }
+  }
+
   function collectAppSettings() {
     const connection = getConnection();
     const importDefaults = collectImportOptions({ dryRun: false });
@@ -675,6 +833,9 @@
         name: profileNameFromBaseUrl(connection.baseUrl),
         baseUrl: connection.baseUrl,
         apiKey: connection.apiKey || undefined,
+        databasePath: String(els.embyDatabasePath?.value || "").trim(),
+        containerName: String(els.embyContainerName?.value || "").trim(),
+        autoManageContainer: Boolean(els.autoManageContainer?.checked),
         role: "source-target",
       },
       defaults: {
@@ -713,6 +874,9 @@
       name: profileNameFromBaseUrl(connection.baseUrl),
       baseUrl: connection.baseUrl,
       apiKey: connection.apiKey || undefined,
+      databasePath: String(els.embyDatabasePath?.value || "").trim(),
+      containerName: String(els.embyContainerName?.value || "").trim(),
+      autoManageContainer: Boolean(els.autoManageContainer?.checked),
       role: "source-target",
     };
   }
@@ -730,6 +894,7 @@
       renderAppSettings(data);
       clearLibraryState();
       applyProfileToConnection(changedRole === "target" ? targetProfile : sourceProfile);
+      await loadEmbyDatabases();
       appendSystemLog("已切换要使用的服务器。");
     } catch (error) {
       setNotice(els.connectionNotice, `切换服务器失败：${error.message}`, "error");
@@ -791,6 +956,7 @@
       const data = await postJson("/api/settings/app", payload);
       renderAppSettings(data);
       selectSavedProfile(connection.baseUrl);
+      await loadEmbyDatabases({ quiet: true });
       persistConnection(connection);
       setNotice(els.connectionNotice, "服务器地址和任务选项已保存。后续同一地址会自动使用已保存 Key。", "ok");
       appendSystemLog("服务器地址和任务选项已保存。");
@@ -919,6 +1085,11 @@
     }
     setChecked(`${prefix}Overwrite`, prefs.overwrite);
     setChecked(`${prefix}IncludePeopleImages`, prefs.includePeopleImages);
+    if (group === "export") {
+      setChecked("exportIncludeMediaInfo", prefs.includeMediaInfo);
+    } else {
+      setChecked("importMediaInfo", prefs.importMediaInfo);
+    }
     if (Number.isFinite(Number(prefs.concurrency))) {
       els[`${prefix}Concurrency`].value = String(Math.max(1, Number.parseInt(prefs.concurrency, 10)));
     }
@@ -1220,6 +1391,38 @@
     });
   }
 
+  async function handleApplyMediaDatabase() {
+    const exportPath = selectedExportPath();
+    const selectedTargetProfileId = targetProfileId();
+    const databasePath = String(els.embyDatabasePath?.value || "").trim();
+    const autoManageContainer = Boolean(els.autoManageContainer?.checked);
+    if (!exportPath || !selectedTargetProfileId || !databasePath) {
+      setNotice(els.importNotice, "请先选择导出包、目标服务器和数据库。", "error");
+      return;
+    }
+    setButtonBusy("applyMediaDatabase", els.applyMediaDatabaseBtn, true, "应用中");
+    try {
+      const data = await postJson("/api/jobs/media-info/apply", {
+        exportPath,
+        targetProfileId: selectedTargetProfileId,
+        databasePath,
+        autoManageContainer,
+      });
+      const jobId = readJobId(data);
+      if (!jobId) {
+        throw new Error("后端未返回任务 ID。");
+      }
+      beginJob(jobId, "媒体信息写库", data);
+      loadJobs(false);
+      setNotice(els.importNotice, `媒体信息写库任务已创建：${jobId}`, "ok");
+    } catch (error) {
+      setNotice(els.importNotice, `创建媒体信息写库任务失败：${error.message}`, "error");
+    } finally {
+      setButtonBusy("applyMediaDatabase", els.applyMediaDatabaseBtn, false);
+      updateControls();
+    }
+  }
+
   async function startImportLikeJob({ endpoint, buttonKey, button, busyText, dryRun, kind, actionName }) {
     const exportPath = selectedExportPath();
     if (!canUseTargetConnection() || !exportPath) {
@@ -1405,6 +1608,7 @@
       incremental: els.exportIncremental.checked,
       overwrite: els.exportOverwrite.checked,
       includePeopleImages: !skipImages && els.exportIncludePeopleImages.checked,
+      includeMediaInfo: Boolean(els.exportIncludeMediaInfo?.checked),
       imageTypes: skipImages ? [] : getCheckedImageTypes("export"),
       concurrency: readConcurrency(els.exportConcurrency),
     };
@@ -1418,6 +1622,8 @@
       overwrite: els.importOverwrite.checked,
       resume: Boolean(els.importResume?.checked),
       includePeopleImages: !skipImages && els.importIncludePeopleImages.checked,
+      importMediaInfo: Boolean(els.importMediaInfo?.checked),
+      mediaInfoMode: "database",
       imageTypes: skipImages ? [] : getCheckedImageTypes("import"),
       concurrency: readConcurrency(els.importConcurrency),
     };
@@ -1775,6 +1981,7 @@
 
   function updateControls() {
     const locked = state.authEnabled && !state.authenticated;
+    const operator = !locked && (!state.role || state.role === "operator" || state.role === "admin");
     const canLoadLibraries = canUseSourceConnection() || canUseTargetConnection();
     const hasLibraries = state.libraries.length > 0 || state.targetLibraries.length > 0;
     const hasSelectedLibraries = state.selectedLibraryIds.size > 0;
@@ -1789,6 +1996,11 @@
       locked || !canLoadLibraries || state.busy.has("refreshLibraries");
     els.refreshExportsBtn.disabled = locked || state.busy.has("refreshExports");
     els.saveAppSettingsBtn.disabled = locked || state.busy.has("saveAppSettings");
+    els.refreshEmbyDatabasesBtn.disabled =
+      locked || !targetProfileId() || state.busy.has("refreshEmbyDatabases");
+    els.embyDatabasePath.disabled = locked || state.busy.has("refreshEmbyDatabases");
+    els.autoManageContainer.disabled =
+      locked || !state.dockerAvailable || state.busy.has("refreshEmbyDatabases");
     els.saveTelegramBtn.disabled = locked || state.busy.has("saveTelegram");
     els.testTelegramBtn.disabled = locked || state.busy.has("testTelegram");
     els.changePasswordBtn.disabled = locked || !state.authenticated || state.busy.has("changePassword");
@@ -1815,6 +2027,12 @@
       !hasImportPath ||
       !hasSelectedTargetLibraries ||
       state.busy.has("startImport");
+    els.applyMediaDatabaseBtn.disabled =
+      !operator ||
+      !selectedExportPath() ||
+      !targetProfileId() ||
+      !String(els.embyDatabasePath?.value || "").trim() ||
+      state.busy.has("applyMediaDatabase");
 
     setImageControlsDisabled("export", els.exportSkipImages.checked);
     setImageControlsDisabled("import", els.importSkipImages.checked);
@@ -2832,7 +3050,8 @@
       return `跳过图片；并发 ${options.concurrency}`;
     }
     const people = options.includePeopleImages ? "含人物头像" : "不含人物头像";
-    return `${options.imageTypes.join(", ")}；${people}；并发 ${options.concurrency}`;
+    const mediaInfo = options.includeMediaInfo || options.importMediaInfo ? "含媒体技术信息" : "不含媒体技术信息";
+    return `${options.imageTypes.join(", ")}；${people}；${mediaInfo}；并发 ${options.concurrency}`;
   }
 
   function readJobId(data) {

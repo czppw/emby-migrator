@@ -1,6 +1,6 @@
 <svg width="1100" height="220" viewBox="0 0 1100 220" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Emby Migrator 工作流程</title>
-  <desc id="desc">从旧 Emby 服务器导出元数据与图片，生成导出包，再导入到目标 Emby 服务器并生成报告。</desc>
+  <desc id="desc">从旧 Emby 服务器导出元数据、图片与媒体技术信息，生成导出包，再导入到目标 Emby 服务器并生成报告。</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1100" y2="220" gradientUnits="userSpaceOnUse">
       <stop stop-color="#F8FAFC"/>
@@ -27,7 +27,7 @@
 
       <rect x="338" y="78" width="130" height="64" rx="16" fill="white" stroke="#D6E0F0"/>
       <text x="403" y="104" text-anchor="middle" fill="#0F172A" font-size="15" font-weight="800">导出数据</text>
-      <text x="403" y="126" text-anchor="middle" fill="#64748B" font-size="12">元数据 / 图片</text>
+      <text x="403" y="126" text-anchor="middle" fill="#64748B" font-size="10">元数据 / 图片 / 媒体信息</text>
 
       <rect x="498" y="66" width="132" height="88" rx="18" fill="#EEF4FF" stroke="#9DB8FF"/>
       <text x="564" y="101" text-anchor="middle" fill="#1D4ED8" font-size="16" font-weight="850">导出包</text>

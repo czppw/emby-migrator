@@ -109,6 +109,9 @@ type Item struct {
 	BackdropImageTags []string          `json:"BackdropImageTags,omitempty"`
 	CollectionType    string            `json:"CollectionType,omitempty"`
 	ChildCount        int               `json:"ChildCount,omitempty"`
+	MediaSources      []map[string]any  `json:"MediaSources,omitempty"`
+	MediaStreams      []map[string]any  `json:"MediaStreams,omitempty"`
+	Chapters          []map[string]any  `json:"Chapters,omitempty"`
 	Raw               map[string]any    `json:"Raw,omitempty"`
 }
 
@@ -180,6 +183,9 @@ func (i *Item) UnmarshalJSON(data []byte) error {
 		BackdropImageTags: stringSliceFromAny(raw["BackdropImageTags"]),
 		CollectionType:    stringFromAny(raw["CollectionType"]),
 		ChildCount:        intFromAny(raw["ChildCount"]),
+		MediaSources:      objectSliceFromAny(raw["MediaSources"]),
+		MediaStreams:      objectSliceFromAny(raw["MediaStreams"]),
+		Chapters:          objectSliceFromAny(raw["Chapters"]),
 		Raw:               raw,
 	}
 	return nil
@@ -340,6 +346,25 @@ func peopleFromAny(value any) []Person {
 			ProviderIDs:     stringMapFromAny(raw["ProviderIds"]),
 			Raw:             raw,
 		})
+	}
+	return out
+}
+
+func objectSliceFromAny(value any) []map[string]any {
+	list, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		raw, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, raw)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -666,11 +691,23 @@ func normalizeLibraryIDs(values []string) []string {
 }
 
 func (c *Client) Item(ctx context.Context, id string) (Item, error) {
-	var item Item
-	err := c.JSON(ctx, http.MethodGet, "/Items/"+url.PathEscape(id), url.Values{
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Item{}, fmt.Errorf("item id is required")
+	}
+	var result ItemsResponse
+	err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
+		"Ids":    {id},
+		"Limit":  {"1"},
 		"Fields": {"Path,MediaSources,MediaStreams,Overview,Genres,Studios,Tags,Taglines,ProviderIds,OfficialRating,ProductionYear,PremiereDate,CommunityRating,People,Chapters,OriginalTitle,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,ImageTags,BackdropImageTags"},
-	}, nil, &item)
-	return item, err
+	}, nil, &result)
+	if err != nil {
+		return Item{}, err
+	}
+	if len(result.Items) == 0 {
+		return Item{}, fmt.Errorf("item %q not found", id)
+	}
+	return result.Items[0], nil
 }
 
 func (c *Client) Person(ctx context.Context, name string) (Person, error) {

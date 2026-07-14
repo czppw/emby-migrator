@@ -13,8 +13,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 	app := readFrontendFile(t, "assets", "app.js")
 
 	for _, marker := range []string{
-		`./assets/styles.css?v=1.0.0`,
-		`./assets/app.js?v=1.0.0`,
+		`./assets/styles.css?v=1.1.0`,
+		`./assets/app.js?v=1.1.0`,
 		"https://github.com/czppw/emby-migrator",
 		"https://hub.docker.com/r/czppwa/emby-migrator",
 		"License: AGPL-3.0-or-later",
@@ -23,6 +23,15 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		"导出图片类型",
 		"导入图片类型",
 		"默认全选，可直接调整",
+		`id="exportIncludeMediaInfo" checked`,
+		`id="importMediaInfo" checked`,
+		"保存 MediaSources、MediaStreams 和 Chapters。",
+		"失败会自动降级且不影响普通元数据",
+		`id="embyDatabasePath"`,
+		`id="refreshEmbyDatabasesBtn"`,
+		`id="embyContainerName"`,
+		`id="autoManageContainer"`,
+		"自动停启",
 	} {
 		if !strings.Contains(index, marker) {
 			t.Fatalf("index.html missing regression marker %q", marker)
@@ -34,12 +43,22 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 			t.Fatalf("server address book UI still contains forbidden marker %q", forbidden)
 		}
 	}
+	for _, forbidden := range []string{"ensureMediaInfoOptions", "ensureMediaInfoOption("} {
+		if strings.Contains(app, forbidden) {
+			t.Fatalf("media info controls must be static HTML; app.js contains %q", forbidden)
+		}
+	}
 
 	for _, marker := range []string{
 		"const DEFAULT_IMAGE_TYPES = Object.freeze([...IMAGE_TYPES]);",
 		"checkbox.checked = true;",
 		"const TASK_PREFS_SCHEMA_VERSION = 2;",
 		"restoreImageTypes: false",
+		"includeMediaInfo: Boolean(els.exportIncludeMediaInfo?.checked)",
+		"importMediaInfo: Boolean(els.importMediaInfo?.checked)",
+		`/api/emby-databases?profileId=${encodeURIComponent(profileId)}`,
+		"targetProfileId: selectedTargetProfileId",
+		"autoManageContainer: Boolean(els.autoManageContainer?.checked)",
 	} {
 		if !strings.Contains(app, marker) {
 			t.Fatalf("app.js missing image-type default marker %q", marker)
@@ -53,6 +72,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		"grid-template-columns: repeat(auto-fit, minmax(min(100%, 118px), 1fr));",
 		"overflow: visible;",
 		".app-footer",
+		".database-picker",
+		".switch-control input:checked + .switch-track",
 	} {
 		if !strings.Contains(styles, marker) {
 			t.Fatalf("styles.css missing layout guard marker %q", marker)

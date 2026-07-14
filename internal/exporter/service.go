@@ -33,6 +33,7 @@ type ExportRequest struct {
 	Concurrency         int             `json:"concurrency"`
 	SkipImages          bool            `json:"skipImages"`
 	IncludePeopleImages bool            `json:"includePeopleImages"`
+	IncludeMediaInfo    bool            `json:"includeMediaInfo"`
 	Incremental         bool            `json:"incremental"`
 	Overwrite           bool            `json:"overwrite"`
 	ImageTypes          []string        `json:"imageTypes"`
@@ -48,6 +49,8 @@ type ImportRequest struct {
 	DryRun              bool            `json:"dryRun"`
 	SkipImages          bool            `json:"skipImages"`
 	IncludePeopleImages bool            `json:"includePeopleImages"`
+	ImportMediaInfo     bool            `json:"importMediaInfo"`
+	MediaInfoMode       string          `json:"mediaInfoMode,omitempty"`
 	Overwrite           bool            `json:"overwrite"`
 	Resume              bool            `json:"resume"`
 	ImageTypes          []string        `json:"imageTypes"`
@@ -96,19 +99,28 @@ type CompatibilityProfile struct {
 }
 
 type ImportReport struct {
-	StartedAt     time.Time            `json:"startedAt"`
-	EndedAt       time.Time            `json:"endedAt"`
-	DryRun        bool                 `json:"dryRun"`
-	Target        ImportTarget         `json:"target,omitempty"`
-	Compatibility CompatibilityProfile `json:"compatibility"`
-	Diff          ImportDiff           `json:"diff,omitempty"`
-	Incremental   *ImportIncremental   `json:"incremental,omitempty"`
-	Skips         *ImportSkipReport    `json:"skips,omitempty"`
-	Failures      FailureReport        `json:"failures,omitempty"`
-	Matches       []ImportMatch        `json:"matches"`
-	PersonMatches []ImportMatch        `json:"personMatches,omitempty"`
-	Summary       storage.Summary      `json:"summary"`
-	WritesSkipped int                  `json:"writesSkipped,omitempty"`
+	StartedAt     time.Time             `json:"startedAt"`
+	EndedAt       time.Time             `json:"endedAt"`
+	DryRun        bool                  `json:"dryRun"`
+	Target        ImportTarget          `json:"target,omitempty"`
+	Compatibility CompatibilityProfile  `json:"compatibility"`
+	Diff          ImportDiff            `json:"diff,omitempty"`
+	Incremental   *ImportIncremental    `json:"incremental,omitempty"`
+	Skips         *ImportSkipReport     `json:"skips,omitempty"`
+	Failures      FailureReport         `json:"failures,omitempty"`
+	Matches       []ImportMatch         `json:"matches"`
+	PersonMatches []ImportMatch         `json:"personMatches,omitempty"`
+	Summary       storage.Summary       `json:"summary"`
+	WritesSkipped int                   `json:"writesSkipped,omitempty"`
+	MediaDatabase *MediaDatabasePlanRef `json:"mediaDatabase,omitempty"`
+}
+
+type MediaDatabasePlanRef struct {
+	Path       string `json:"path"`
+	Items      int    `json:"items"`
+	Status     string `json:"status"`
+	Database   string `json:"database,omitempty"`
+	BackupPath string `json:"backupPath,omitempty"`
 }
 
 type ImportTarget struct {
@@ -130,6 +142,7 @@ type ImportDiff struct {
 
 type ImportDiffGap struct {
 	Metadata     int `json:"metadata,omitempty"`
+	MediaInfo    int `json:"mediaInfo,omitempty"`
 	ItemImages   int `json:"itemImages,omitempty"`
 	PeopleImages int `json:"peopleImages,omitempty"`
 	Unmatched    int `json:"unmatched,omitempty"`
@@ -193,29 +206,38 @@ type importCheckpoint struct {
 }
 
 type ImportCheckpoint struct {
-	StableKey     string    `json:"stableKey"`
-	SourceName    string    `json:"sourceName,omitempty"`
-	TargetID      string    `json:"targetId,omitempty"`
-	TargetName    string    `json:"targetName,omitempty"`
-	Status        string    `json:"status"`
-	ImageFailures int       `json:"imageFailures,omitempty"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	StableKey        string    `json:"stableKey"`
+	SourceName       string    `json:"sourceName,omitempty"`
+	TargetID         string    `json:"targetId,omitempty"`
+	TargetName       string    `json:"targetName,omitempty"`
+	Status           string    `json:"status"`
+	ImageFailures    int       `json:"imageFailures,omitempty"`
+	MediaInfoUpdated int       `json:"mediaInfoUpdated,omitempty"`
+	MediaInfoSkipped int       `json:"mediaInfoSkipped,omitempty"`
+	MediaInfoFailed  int       `json:"mediaInfoFailed,omitempty"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type ImportMatch struct {
-	StableKey     string   `json:"stableKey"`
-	SourceName    string   `json:"sourceName"`
-	TargetID      string   `json:"targetId,omitempty"`
-	TargetEmbyID  string   `json:"targetEmbyId,omitempty"`
-	TargetName    string   `json:"targetName,omitempty"`
-	Status        string   `json:"status"`
-	Reason        string   `json:"reason"`
-	Strategy      string   `json:"strategy,omitempty"`
-	Candidates    []string `json:"candidates,omitempty"`
-	ImagesPushed  int      `json:"imagesPushed,omitempty"`
-	ImageFailures int      `json:"imageFailures,omitempty"`
-	ImageErrors   []string `json:"imageErrors,omitempty"`
-	Error         string   `json:"error,omitempty"`
+	StableKey         string   `json:"stableKey"`
+	SourceName        string   `json:"sourceName"`
+	TargetID          string   `json:"targetId,omitempty"`
+	TargetEmbyID      string   `json:"targetEmbyId,omitempty"`
+	TargetName        string   `json:"targetName,omitempty"`
+	Status            string   `json:"status"`
+	Reason            string   `json:"reason"`
+	Strategy          string   `json:"strategy,omitempty"`
+	Candidates        []string `json:"candidates,omitempty"`
+	ImagesPushed      int      `json:"imagesPushed,omitempty"`
+	ImageFailures     int      `json:"imageFailures,omitempty"`
+	ImageErrors       []string `json:"imageErrors,omitempty"`
+	MediaInfoUpdated  int      `json:"mediaInfoUpdated,omitempty"`
+	MediaInfoFailed   int      `json:"mediaInfoFailed,omitempty"`
+	MediaInfoSkipped  int      `json:"mediaInfoSkipped,omitempty"`
+	MediaInfoPlanned  int      `json:"mediaInfoPlanned,omitempty"`
+	MediaInfoDegraded bool     `json:"mediaInfoDegraded,omitempty"`
+	MediaInfoError    string   `json:"mediaInfoError,omitempty"`
+	Error             string   `json:"error,omitempty"`
 }
 
 type ExportedItem struct {
@@ -1011,6 +1033,9 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 			manifest.Items = append(manifest.Items, entry)
 			if entry.Skipped {
 				manifest.Summary.SkippedItems++
+				if entry.MediaInfo != nil {
+					manifest.Summary.MediaInfoSkipped++
+				}
 				if manifest.Incremental != nil {
 					manifest.Incremental.SkippedItems++
 				}
@@ -1018,6 +1043,9 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 				manifest.Incremental.ChangedItems++
 			}
 			manifest.Summary.ItemImages += len(entry.Images)
+			if !entry.Skipped {
+				addMediaInfoSummary(&manifest.Summary, entry.MediaInfo)
+			}
 		}
 	}
 	if !req.SkipImages && req.IncludePeopleImages {
@@ -1044,16 +1072,31 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 }
 
 func exportSummaryLine(summary storage.Summary, elapsed time.Duration) string {
+	mediaInfo := ""
+	if summary.ItemsWithMediaInfo > 0 || summary.MediaSources > 0 || summary.MediaStreams > 0 || summary.Chapters > 0 {
+		mediaInfo = fmt.Sprintf("媒体技术信息 %d 项（源 %d 个，流 %d 条，章节 %d 个），", summary.ItemsWithMediaInfo, summary.MediaSources, summary.MediaStreams, summary.Chapters)
+	}
 	return fmt.Sprintf(
-		"导出总结：媒体库 %d 个，项目 %d 个，媒体图片 %d 张，人物 %d 个，人物头像 %d 张，错误 %d 个，用时 %s。",
+		"导出总结：媒体库 %d 个，项目 %d 个，媒体图片 %d 张，人物 %d 个，人物头像 %d 张，错误 %d 个，%s用时 %s。",
 		summary.Libraries,
 		summary.Items,
 		summary.ItemImages,
 		summary.People,
 		summary.PeopleImages,
 		summary.Errors,
+		mediaInfo,
 		formatElapsed(elapsed),
 	)
+}
+
+func addMediaInfoSummary(summary *storage.Summary, info *storage.MediaInfo) {
+	if summary == nil || info == nil {
+		return
+	}
+	summary.ItemsWithMediaInfo++
+	summary.MediaSources += info.SourcesCount
+	summary.MediaStreams += info.StreamsCount
+	summary.Chapters += info.ChaptersCount
 }
 
 func formatElapsed(elapsed time.Duration) string {
@@ -1301,13 +1344,21 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 }
 
 func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, baselineItems map[string]storage.ItemEntry) (storage.ItemEntry, error) {
-	item = s.enrichExportItem(ctx, client, item)
+	enriched, err := s.enrichExportItem(ctx, client, item, req.IncludeMediaInfo)
+	if err != nil {
+		return storage.ItemEntry{}, err
+	}
+	item = enriched
+	if !req.IncludeMediaInfo {
+		item = itemWithoutMediaInfo(item)
+	}
 	stableKey := storage.StableItemKey(item)
 	fingerprint := itemFingerprint(item)
+	mediaInfo := mediaInfoFromItem(item)
 	itemDir := filepath.Join(exportDir, "libraries", storage.SafeName(lib.Name), "items", itemSlug)
 	infoRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "info.json"))
 	rawRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "raw.json"))
-	info := storage.ItemInfo{Item: item, StableKey: stableKey, ExportedAt: time.Now(), People: item.People}
+	info := storage.ItemInfo{Item: item, StableKey: stableKey, ExportedAt: time.Now(), People: item.People, MediaInfo: mediaInfo}
 
 	entry := storage.ItemEntry{
 		StableKey:         stableKey,
@@ -1327,6 +1378,7 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		Fingerprint:       fingerprint,
 		InfoPath:          infoRel,
 		RawPath:           rawRel,
+		MediaInfo:         mediaInfo,
 	}
 	if req.Incremental {
 		if baseline, ok := baselineItems[stableKey]; ok && baseline.Fingerprint != "" && baseline.Fingerprint == fingerprint {
@@ -1383,22 +1435,47 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 	return entry, nil
 }
 
-func (s *Service) enrichExportItem(ctx context.Context, client *emby.Client, item emby.Item) emby.Item {
-	if strings.TrimSpace(item.ID) == "" || !needsExportItemDetails(item) {
-		return item
+func (s *Service) enrichExportItem(ctx context.Context, client *emby.Client, item emby.Item, includeMediaInfo bool) (emby.Item, error) {
+	if strings.TrimSpace(item.ID) == "" || !needsExportItemDetails(item, includeMediaInfo) {
+		return item, nil
 	}
+	mediaInfoRequired := includeMediaInfo && playableMediaInfoIncomplete(item)
 	full, err := client.Item(ctx, item.ID)
 	if err != nil || strings.TrimSpace(full.ID) == "" {
-		return item
+		if mediaInfoRequired {
+			if err == nil {
+				err = fmt.Errorf("empty item detail response")
+			}
+			return item, fmt.Errorf("read media technical details for %s (%s): %w", item.Name, item.ID, err)
+		}
+		return item, nil
 	}
-	return mergeExportItemDetails(item, full)
+	return mergeExportItemDetails(item, full), nil
 }
 
-func needsExportItemDetails(item emby.Item) bool {
+func needsExportItemDetails(item emby.Item, includeMediaInfo bool) bool {
 	return len(item.People) == 0 ||
 		(len(item.ImageTags) == 0 && len(item.BackdropImageTags) == 0) ||
+		(includeMediaInfo && playableMediaInfoIncomplete(item)) ||
 		item.SeriesName == "" && item.Type == "Episode" ||
 		item.IndexNumber == 0 && (item.Type == "Episode" || item.Type == "Season")
+}
+
+func playableMediaInfoIncomplete(item emby.Item) bool {
+	if item.Type != "Movie" && item.Type != "Episode" {
+		return false
+	}
+	info := mediaInfoFromItem(item)
+	return info == nil || info.SourcesCount == 0 || info.StreamsCount == 0 || !rawFieldPresent(item.Raw, "Chapters")
+}
+
+func rawFieldPresent(raw map[string]any, field string) bool {
+	for key := range raw {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeExportItemDetails(base, full emby.Item) emby.Item {
@@ -1444,10 +1521,38 @@ func mergeExportItemDetails(base, full emby.Item) emby.Item {
 	if len(full.BackdropImageTags) == 0 {
 		full.BackdropImageTags = base.BackdropImageTags
 	}
+	if len(full.MediaSources) == 0 {
+		full.MediaSources = base.MediaSources
+	}
+	if len(full.MediaStreams) == 0 {
+		full.MediaStreams = base.MediaStreams
+	}
+	if len(full.Chapters) == 0 {
+		full.Chapters = base.Chapters
+	}
 	if full.Raw == nil {
 		full.Raw = base.Raw
 	}
+	syncItemMediaInfoRaw(&full)
 	return full
+}
+
+func syncItemMediaInfoRaw(item *emby.Item) {
+	if item == nil {
+		return
+	}
+	if item.Raw == nil {
+		item.Raw = map[string]any{}
+	}
+	if len(item.MediaSources) > 0 {
+		item.Raw["MediaSources"] = item.MediaSources
+	}
+	if len(item.MediaStreams) > 0 {
+		item.Raw["MediaStreams"] = item.MediaStreams
+	}
+	if len(item.Chapters) > 0 {
+		item.Raw["Chapters"] = item.Chapters
+	}
 }
 
 func imageTypesForDirectFallback(imageTypes []string) []string {
@@ -1526,9 +1631,148 @@ func itemFingerprint(item emby.Item) string {
 		"imageTags":         sortedStringMap(item.ImageTags),
 		"backdropTags":      sortedStrings(item.BackdropImageTags),
 	}
+	if info := mediaInfoFromItem(item); info != nil {
+		raw["mediaInfoHash"] = info.Hash
+	}
 	data, _ := json.Marshal(raw)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func mediaInfoFromItem(item emby.Item) *storage.MediaInfo {
+	sources := firstObjectSlice(
+		item.MediaSources,
+		objectSliceField(item.Raw, "MediaSources"),
+		objectSliceNestedRawField(item.Raw, "MediaSources"),
+	)
+	streams := firstObjectSlice(
+		item.MediaStreams,
+		objectSliceField(item.Raw, "MediaStreams"),
+		objectSliceNestedRawField(item.Raw, "MediaStreams"),
+	)
+	streams = uniqueObjectSlice(append(streams, mediaStreamsFromSources(sources)...))
+	chapters := firstObjectSlice(
+		item.Chapters,
+		objectSliceField(item.Raw, "Chapters"),
+		objectSliceNestedRawField(item.Raw, "Chapters"),
+	)
+	return storage.NewMediaInfo(sources, streams, chapters)
+}
+
+func itemWithoutMediaInfo(item emby.Item) emby.Item {
+	item.MediaSources = nil
+	item.MediaStreams = nil
+	item.Chapters = nil
+	item.Raw = rawWithoutMediaInfo(item.Raw)
+	return item
+}
+
+func rawWithoutMediaInfo(raw map[string]any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	out := make(map[string]any, len(raw))
+	for key, value := range raw {
+		if isMediaInfoField(key) {
+			continue
+		}
+		if strings.EqualFold(key, "Raw") {
+			if nested, ok := value.(map[string]any); ok {
+				out[key] = rawWithoutMediaInfo(nested)
+				continue
+			}
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func isMediaInfoField(key string) bool {
+	return strings.EqualFold(key, "MediaSources") ||
+		strings.EqualFold(key, "MediaStreams") ||
+		strings.EqualFold(key, "Chapters")
+}
+
+func firstObjectSlice(values ...[]map[string]any) []map[string]any {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func objectSliceNestedRawField(raw map[string]any, key string) []map[string]any {
+	if raw == nil {
+		return nil
+	}
+	nested, ok := raw["Raw"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return objectSliceField(nested, key)
+}
+
+func objectSliceField(raw map[string]any, key string) []map[string]any {
+	if raw == nil {
+		return nil
+	}
+	for rawKey, value := range raw {
+		if strings.EqualFold(rawKey, key) {
+			return objectSliceFromAny(value)
+		}
+	}
+	return nil
+}
+
+func objectSliceFromAny(value any) []map[string]any {
+	switch v := value.(type) {
+	case []map[string]any:
+		out := make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			if len(item) > 0 {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			raw, ok := item.(map[string]any)
+			if ok && len(raw) > 0 {
+				out = append(out, raw)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func mediaStreamsFromSources(sources []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0)
+	for _, source := range sources {
+		out = append(out, objectSliceField(source, "MediaStreams")...)
+	}
+	return out
+}
+
+func uniqueObjectSlice(values []map[string]any) []map[string]any {
+	seen := map[string]bool{}
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		data, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		key := string(data)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func sortedStrings(values []string) []string {
@@ -1628,6 +1872,9 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 		return ImportResult{}, errors.New(validation.Error())
 	}
 	profile := BuildCompatibilityProfile(manifest.EmbyVersion, targetInfo.Version)
+	if databaseMediaInfoEnabled(req) && !sameEmbyMinorSeries(manifest.EmbyVersion, targetInfo.Version) {
+		return ImportResult{}, fmt.Errorf("媒体技术信息离线恢复仅支持同版本系列：源 Emby %s，目标 Emby %s；请关闭媒体技术信息后继续普通元数据和图片迁移", emptyDash(manifest.EmbyVersion), emptyDash(targetInfo.Version))
+	}
 	report := ImportReport{
 		StartedAt:     time.Now(),
 		DryRun:        req.DryRun,
@@ -1636,6 +1883,12 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	}
 	report.Target.BaseURL = strings.TrimRight(req.Connection.BaseURL, "/")
 	report.Diff = initialImportDiff(manifest.Summary)
+	if !req.ImportMediaInfo {
+		report.Diff.Expected.ItemsWithMediaInfo = 0
+		report.Diff.Expected.MediaSources = 0
+		report.Diff.Expected.MediaStreams = 0
+		report.Diff.Expected.Chapters = 0
+	}
 	report.Incremental = importIncrementalReport(manifest)
 	concurrency := normalizeConcurrency(req.Concurrency)
 	items := importableManifestItems(manifest.Items)
@@ -1645,7 +1898,7 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	}
 	resumeDone := map[string]bool{}
 	if req.Resume {
-		if done, reportName := s.resumeSuccessfulItems(exportPath, report.Target); len(done) > 0 {
+		if done, reportName := s.resumeSuccessfulItems(exportPath, report.Target, req.ImportMediaInfo); len(done) > 0 {
 			resumeDone = done
 			j.Log("info", "断点续跑：读取上次报告 %s，跳过已成功项目 %d 个", reportName, len(done))
 		}
@@ -1687,6 +1940,16 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 		addFailureExample(&report.Failures, match)
 		addImageFailureExamples(&report.Failures, match)
 	}
+	if databaseMediaInfoEnabled(req) && !req.DryRun {
+		planRef, err := writeMediaDatabasePlan(exportPath, manifest, report)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		report.MediaDatabase = planRef
+		if planRef != nil {
+			j.Log("info", "媒体技术信息离线写入计划已生成：%s，共 %d 个项目；停止目标 Emby 后再应用数据库计划", planRef.Path, planRef.Items)
+		}
+	}
 	if !req.SkipImages && req.IncludePeopleImages {
 		if err := s.importPeopleImages(ctx, client, cache, checkpoint, exportPath, manifest, &report, j, req.Resume, req.DryRun, concurrency); err != nil {
 			return ImportResult{}, err
@@ -1717,19 +1980,24 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 func importSummaryLine(report ImportReport) string {
 	total := len(report.Matches)
 	elapsed := formatElapsed(reportElapsed(report))
+	mediaInfo := ""
+	if report.Summary.MediaInfoUpdated > 0 || report.Summary.MediaInfoFailed > 0 || report.Summary.MediaInfoSkipped > 0 || report.Summary.MediaInfoPlanned > 0 {
+		mediaInfo = fmt.Sprintf("，媒体技术信息成功 %d 项/跳过 %d 项/降级 %d 项/计划 %d 项", report.Summary.MediaInfoUpdated, report.Summary.MediaInfoSkipped, report.Summary.MediaInfoFailed, report.Summary.MediaInfoPlanned)
+	}
 	if report.DryRun {
 		return fmt.Sprintf(
-			"导入验证总结：项目 %d 个，匹配 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个，用时 %s；本次未写入元数据和图片。",
+			"导入验证总结：项目 %d 个，匹配 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个%s，用时 %s；本次未写入元数据和图片。",
 			total,
 			report.Summary.Matched,
 			report.Summary.Unmatched,
 			report.Summary.Ambiguous,
 			report.Summary.Errors,
+			mediaInfo,
 			elapsed,
 		)
 	}
 	return fmt.Sprintf(
-		"导入总结：项目 %d 个，元数据成功 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个，媒体图片成功 %d 张/失败 %d 张，人物头像成功 %d 张/失败 %d 张，用时 %s。",
+		"导入总结：项目 %d 个，元数据成功 %d 个，未匹配 %d 个，歧义 %d 个，错误 %d 个，媒体图片成功 %d 张/失败 %d 张，人物头像成功 %d 张/失败 %d 张%s，用时 %s。",
 		total,
 		report.Summary.MetadataUpdated,
 		report.Summary.Unmatched,
@@ -1739,6 +2007,7 @@ func importSummaryLine(report ImportReport) string {
 		report.Summary.ItemImagesFailed,
 		report.Summary.PeopleImages,
 		report.Summary.PeopleImagesFailed,
+		mediaInfo,
 		elapsed,
 	)
 }
@@ -1765,11 +2034,12 @@ func finalizeImportDiff(diff ImportDiff, actual storage.Summary) ImportDiff {
 	diff.After = actual
 	diff.Missing = ImportDiffGap{
 		Metadata:     positiveDiff(diff.Expected.Items-diff.Expected.SkippedItems, actual.MetadataUpdated),
+		MediaInfo:    positiveDiff(diff.Expected.ItemsWithMediaInfo, actual.MediaInfoUpdated+actual.MediaInfoSkipped),
 		ItemImages:   positiveDiff(diff.Expected.ItemImages, actual.ItemImagesPushed),
 		PeopleImages: positiveDiff(diff.Expected.PeopleImages, actual.PeopleImages),
 		Unmatched:    actual.Unmatched,
 		Ambiguous:    actual.Ambiguous,
-		Errors:       actual.Errors + actual.ItemImagesFailed + actual.PeopleImagesFailed,
+		Errors:       actual.Errors + actual.ItemImagesFailed + actual.PeopleImagesFailed + actual.MediaInfoFailed,
 	}
 	return diff
 }
@@ -1875,7 +2145,7 @@ func addSkippedWrites(report *ImportReport, source string, count int) {
 	}
 }
 
-func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget) (map[string]bool, string) {
+func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, requireMediaInfo ...bool) (map[string]bool, string) {
 	entries, err := os.ReadDir(exportPath)
 	if err != nil {
 		return nil, ""
@@ -1884,7 +2154,7 @@ func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget) 
 	sources := make([]string, 0)
 	if checkpoint, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target); ok {
 		for key, item := range checkpoint.Items {
-			if shouldResumeItemCheckpoint(item) {
+			if shouldResumeItemCheckpoint(item, requireMediaInfo...) {
 				done[key] = true
 			}
 		}
@@ -1906,7 +2176,7 @@ func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget) 
 		}
 		added := 0
 		for _, match := range report.Matches {
-			if shouldResumeMatch(match, report.DryRun) {
+			if shouldResumeMatch(match, report.DryRun, requireMediaInfo...) {
 				done[match.StableKey] = true
 				added++
 			}
@@ -1943,15 +2213,21 @@ func shouldResumeStatus(status string, dryRun bool) bool {
 	}
 }
 
-func shouldResumeMatch(match ImportMatch, dryRun bool) bool {
-	if match.ImageFailures > 0 {
+func shouldResumeMatch(match ImportMatch, dryRun bool, requireMediaInfo ...bool) bool {
+	if match.ImageFailures > 0 || match.MediaInfoFailed > 0 {
+		return false
+	}
+	if len(requireMediaInfo) > 0 && requireMediaInfo[0] && match.MediaInfoUpdated == 0 && match.MediaInfoSkipped == 0 {
 		return false
 	}
 	return shouldResumeStatus(match.Status, dryRun)
 }
 
-func shouldResumeItemCheckpoint(item ImportCheckpoint) bool {
-	if item.ImageFailures > 0 {
+func shouldResumeItemCheckpoint(item ImportCheckpoint, requireMediaInfo ...bool) bool {
+	if item.ImageFailures > 0 || item.MediaInfoFailed > 0 {
+		return false
+	}
+	if len(requireMediaInfo) > 0 && requireMediaInfo[0] && item.MediaInfoUpdated == 0 && item.MediaInfoSkipped == 0 {
 		return false
 	}
 	return shouldResumeStatus(item.Status, false)
@@ -2027,13 +2303,16 @@ func (s *importCheckpointStore) Record(match ImportMatch) error {
 	checkpoint.Target = s.target
 	checkpoint.UpdatedAt = now
 	checkpoint.Items[match.StableKey] = ImportCheckpoint{
-		StableKey:     match.StableKey,
-		SourceName:    match.SourceName,
-		TargetID:      firstNonEmpty(match.TargetID, match.TargetEmbyID),
-		TargetName:    match.TargetName,
-		Status:        match.Status,
-		ImageFailures: match.ImageFailures,
-		UpdatedAt:     now,
+		StableKey:        match.StableKey,
+		SourceName:       match.SourceName,
+		TargetID:         firstNonEmpty(match.TargetID, match.TargetEmbyID),
+		TargetName:       match.TargetName,
+		Status:           match.Status,
+		ImageFailures:    match.ImageFailures,
+		MediaInfoUpdated: match.MediaInfoUpdated,
+		MediaInfoSkipped: match.MediaInfoSkipped,
+		MediaInfoFailed:  match.MediaInfoFailed,
+		UpdatedAt:        now,
 	}
 	return storage.WriteJSON(s.path, checkpoint)
 }
@@ -2086,6 +2365,9 @@ func shouldCheckpointMatch(match ImportMatch, dryRun bool) bool {
 	if match.ImageFailures > 0 {
 		return false
 	}
+	if match.MediaInfoFailed > 0 {
+		return false
+	}
 	switch match.Status {
 	case "updated":
 		return true
@@ -2115,6 +2397,10 @@ func addImportMatchSummary(report *ImportReport, match ImportMatch, dryRun bool)
 	}
 	report.Summary.ItemImagesPushed += match.ImagesPushed
 	report.Summary.ItemImagesFailed += match.ImageFailures
+	report.Summary.MediaInfoUpdated += match.MediaInfoUpdated
+	report.Summary.MediaInfoFailed += match.MediaInfoFailed
+	report.Summary.MediaInfoSkipped += match.MediaInfoSkipped
+	report.Summary.MediaInfoPlanned += match.MediaInfoPlanned
 }
 
 func addFailureExample(report *FailureReport, match ImportMatch) {
@@ -2341,65 +2627,327 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 	match.TargetName = target.Name
 	match.Reason = reason
 	match.Strategy = reason
+	current := target
+	if databaseMediaInfoEnabled(req) {
+		mediaPayload := packageMediaInfoPayload(exportPath, entry)
+		mergeItemMetadata(&current, entry, exportPath, false)
+		if len(mediaPayload) > 0 {
+			match.MediaInfoPlanned = 1
+		} else {
+			match.MediaInfoSkipped = 1
+		}
+		if req.DryRun {
+			match.Status = "matched"
+			return match
+		}
+		metadataResult := updateItemMetadata(ctx, client, target.ID, current, false, nil)
+		if !req.SkipImages {
+			importItemImages(ctx, client, exportPath, entry, req, target.ID, &match)
+		}
+		if metadataResult.Err != nil {
+			match.Status = "failed"
+			match.Error = metadataResult.Err.Error()
+			return match
+		}
+		match.Status = "updated"
+		return match
+	}
+	targetDetails := target
+	targetMediaInfoReadable := true
+	var targetMediaInfoErr error
+	if req.ImportMediaInfo {
+		var detail emby.Item
+		targetMediaInfoErr = retryWithTimeout(ctx, importRetryAttempts, importMatchTimeout, func(attemptCtx context.Context) error {
+			var detailErr error
+			detail, detailErr = client.Item(attemptCtx, target.ID)
+			return detailErr
+		})
+		if targetMediaInfoErr == nil && detail.ID != "" {
+			targetDetails = mergeExportItemDetails(target, detail)
+			current = targetDetails
+		} else {
+			targetMediaInfoReadable = false
+			if targetMediaInfoErr == nil {
+				targetMediaInfoErr = fmt.Errorf("empty item detail response")
+			}
+		}
+	}
+	mediaInfoIncluded := mergeItemMetadata(&current, entry, exportPath, req.ImportMediaInfo && targetMediaInfoReadable)
+	expectedMediaInfo := mediaInfoPayloadFromRaw(current.Raw)
+	if req.ImportMediaInfo {
+		switch {
+		case !targetMediaInfoReadable:
+			match.MediaInfoFailed = 1
+			match.MediaInfoDegraded = true
+			match.MediaInfoError = "target media technical details are unavailable: " + targetMediaInfoErr.Error()
+		case !mediaInfoIncluded:
+			match.MediaInfoSkipped = 1
+		case mediaInfoPayloadContains(sanitizedMediaInfoPayload(targetDetails, storage.ItemEntry{}, ""), expectedMediaInfo):
+			current.Raw = payloadWithoutMediaInfo(current.Raw)
+			mediaInfoIncluded = false
+			match.MediaInfoSkipped = 1
+		case req.DryRun:
+			match.MediaInfoPlanned = 1
+		}
+	}
 	if req.DryRun {
 		match.Status = "matched"
 		return match
 	}
-	current := target
-	mergeItemMetadata(&current, entry, exportPath)
-	metadataErr := updateItemMetadata(ctx, client, target.ID, current)
-	if !req.SkipImages {
-		imageTypeSet := allowedImageTypes(req.ImageTypes)
-		for _, img := range entry.Images {
-			if len(imageTypeSet) > 0 && !imageTypeSet[strings.ToLower(img.Type)] {
-				continue
-			}
-			imagePath, err := safePackagePath(exportPath, img.Path)
-			if err == nil {
-				data, err := os.ReadFile(imagePath)
-				if err == nil {
-					err = retryWithTimeout(ctx, importRetryAttempts, itemImageUploadTimeout, func(attemptCtx context.Context) error {
-						return client.UploadImage(attemptCtx, target.ID, img.Type, data)
-					})
-				}
-			}
-			if err != nil {
-				match.ImageFailures++
-				match.ImageErrors = append(match.ImageErrors, fmt.Sprintf("%s 处理失败: %v", img.Type, err))
-				continue
-			}
-			match.ImagesPushed++
-		}
+	metadataResult := updateItemMetadata(ctx, client, target.ID, current, mediaInfoIncluded, expectedMediaInfo)
+	if metadataResult.MediaInfoUpdated {
+		match.MediaInfoUpdated = 1
 	}
-	if metadataErr != nil {
+	if metadataResult.MediaInfoFailed {
+		match.MediaInfoFailed = 1
+		match.MediaInfoDegraded = metadataResult.Degraded
+		match.MediaInfoError = metadataResult.MediaInfoError
+	}
+	if !req.SkipImages {
+		importItemImages(ctx, client, exportPath, entry, req, target.ID, &match)
+	}
+	if metadataResult.Err != nil {
 		match.Status = "failed"
-		match.Error = metadataErr.Error()
+		match.Error = metadataResult.Err.Error()
 		return match
 	}
 	match.Status = "updated"
 	return match
 }
 
-func updateItemMetadata(ctx context.Context, client *emby.Client, targetID string, item emby.Item) error {
+func importItemImages(ctx context.Context, client *emby.Client, exportPath string, entry storage.ItemEntry, req ImportRequest, targetID string, match *ImportMatch) {
+	imageTypeSet := allowedImageTypes(req.ImageTypes)
+	for _, img := range entry.Images {
+		if len(imageTypeSet) > 0 && !imageTypeSet[strings.ToLower(img.Type)] {
+			continue
+		}
+		imagePath, err := safePackagePath(exportPath, img.Path)
+		if err == nil {
+			data, readErr := os.ReadFile(imagePath)
+			err = readErr
+			if err == nil {
+				err = retryWithTimeout(ctx, importRetryAttempts, itemImageUploadTimeout, func(attemptCtx context.Context) error {
+					return client.UploadImage(attemptCtx, targetID, img.Type, data)
+				})
+			}
+		}
+		if err != nil {
+			match.ImageFailures++
+			match.ImageErrors = append(match.ImageErrors, fmt.Sprintf("%s 处理失败: %v", img.Type, err))
+			continue
+		}
+		match.ImagesPushed++
+	}
+}
+
+func databaseMediaInfoEnabled(req ImportRequest) bool {
+	return req.ImportMediaInfo && !strings.EqualFold(strings.TrimSpace(req.MediaInfoMode), "legacy-http")
+}
+
+func sameEmbyMinorSeries(source, target string) bool {
+	series := func(value string) string {
+		parts := strings.Split(strings.TrimSpace(value), ".")
+		if len(parts) < 3 {
+			return ""
+		}
+		candidate := strings.Join(parts[:3], ".")
+		if candidate != "4.8.11" && candidate != "4.9.5" {
+			return ""
+		}
+		return candidate
+	}
+	sourceSeries := series(source)
+	return sourceSeries != "" && sourceSeries == series(target)
+}
+
+type metadataUpdateResult struct {
+	Err              error
+	MediaInfoUpdated bool
+	MediaInfoFailed  bool
+	Degraded         bool
+	MediaInfoError   string
+}
+
+func updateItemMetadata(ctx context.Context, client *emby.Client, targetID string, item emby.Item, mediaInfoIncluded bool, expectedMediaInfo map[string]any) metadataUpdateResult {
 	err := retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
 		return client.UpdateItem(attemptCtx, targetID, item)
 	})
-	if err == nil || !shouldRetryWithMinimalMetadata(err) {
-		return err
+	if err == nil {
+		if !mediaInfoIncluded {
+			return metadataUpdateResult{}
+		}
+		verified, verifyErr := verifyMediaInfoWrite(ctx, client, targetID, expectedMediaInfo)
+		if verified {
+			return metadataUpdateResult{MediaInfoUpdated: true}
+		}
+		message := "target Emby did not persist media technical fields"
+		if verifyErr != nil {
+			message = "media technical fields write verification failed: " + verifyErr.Error()
+		}
+		return metadataUpdateResult{MediaInfoFailed: true, Degraded: true, MediaInfoError: message}
 	}
+	if ctx.Err() != nil || (!mediaInfoIncluded && !shouldRetryWithMinimalMetadata(err)) {
+		return metadataUpdateResult{Err: err, MediaInfoFailed: mediaInfoIncluded, MediaInfoError: err.Error()}
+	}
+	firstErr := err
 	compatibility := item
 	compatibility.Raw = compatibilityMetadataPayload(item.Raw)
+	if mediaInfoIncluded {
+		compatibility.Raw = payloadWithoutMediaInfo(compatibility.Raw)
+	}
 	err = retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
 		return client.UpdateItem(attemptCtx, targetID, compatibility)
 	})
-	if err == nil || !shouldRetryWithMinimalMetadata(err) {
-		return err
+	if err == nil {
+		result := metadataUpdateResult{Err: err}
+		if mediaInfoIncluded {
+			result.MediaInfoFailed = true
+			result.Degraded = true
+			result.MediaInfoError = firstErr.Error()
+		}
+		return result
+	}
+	if ctx.Err() != nil || (!mediaInfoIncluded && !shouldRetryWithMinimalMetadata(err)) {
+		return metadataUpdateResult{Err: err}
 	}
 	fallback := item
 	fallback.Raw = minimalMetadataPayload(item.Raw)
-	return retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
+	err = retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
 		return client.UpdateItem(attemptCtx, targetID, fallback)
 	})
+	result := metadataUpdateResult{Err: err}
+	if mediaInfoIncluded {
+		result.MediaInfoFailed = true
+		result.Degraded = true
+		result.MediaInfoError = firstErr.Error()
+	}
+	return result
+}
+
+func verifyMediaInfoWrite(ctx context.Context, client *emby.Client, targetID string, expected map[string]any) (bool, error) {
+	var actual emby.Item
+	err := retryWithTimeout(ctx, importRetryAttempts, itemMetadataTimeout, func(attemptCtx context.Context) error {
+		var itemErr error
+		actual, itemErr = client.Item(attemptCtx, targetID)
+		return itemErr
+	})
+	if err != nil {
+		return false, err
+	}
+	actualPayload := sanitizedMediaInfoPayload(actual, storage.ItemEntry{}, "")
+	return mediaInfoPayloadContains(actualPayload, expected), nil
+}
+
+func mediaInfoPayloadFromRaw(raw map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{"MediaSources", "MediaStreams", "Chapters"} {
+		if values := objectSliceField(raw, key); len(values) > 0 {
+			out[key] = values
+		}
+	}
+	return out
+}
+
+func mediaInfoPayloadContains(actual, expected map[string]any) bool {
+	for key, expectedValue := range expected {
+		actualValue, ok := mapValueFold(actual, key)
+		if !ok || !mediaInfoValueContains(actualValue, expectedValue) {
+			return false
+		}
+	}
+	return len(expected) > 0
+}
+
+func mediaInfoValueContains(actual, expected any) bool {
+	if expectedMap, ok := expected.(map[string]any); ok {
+		actualMap, ok := actual.(map[string]any)
+		return ok && mediaInfoMapContains(actualMap, expectedMap)
+	}
+	if expectedList := objectSliceFromAny(expected); len(expectedList) > 0 {
+		actualList := objectSliceFromAny(actual)
+		matchedActual := make([]bool, len(actualList))
+		for _, expectedItem := range expectedList {
+			matched := false
+			for index, actualItem := range actualList {
+				if matchedActual[index] {
+					continue
+				}
+				if mediaInfoMapContains(actualItem, expectedItem) {
+					matchedActual[index] = true
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		return true
+	}
+	return mediaInfoScalarEqual(actual, expected)
+}
+
+func mediaInfoMapContains(actual, expected map[string]any) bool {
+	for key, expectedValue := range expected {
+		actualValue, ok := mapValueFold(actual, key)
+		if !ok || !mediaInfoValueContains(actualValue, expectedValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func mapValueFold(values map[string]any, key string) (any, bool) {
+	for candidate, value := range values {
+		if strings.EqualFold(candidate, key) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func mediaInfoScalarEqual(actual, expected any) bool {
+	if actual == nil || expected == nil {
+		return actual == nil && expected == nil
+	}
+	if actualNumber, ok := mediaInfoNumber(actual); ok {
+		if expectedNumber, ok := mediaInfoNumber(expected); ok {
+			return actualNumber == expectedNumber
+		}
+	}
+	switch expectedValue := expected.(type) {
+	case string:
+		actualValue, ok := actual.(string)
+		return ok && actualValue == expectedValue
+	case bool:
+		actualValue, ok := actual.(bool)
+		return ok && actualValue == expectedValue
+	case []string:
+		actualValues, ok := actual.([]string)
+		if !ok || len(actualValues) != len(expectedValue) {
+			return false
+		}
+		for index := range expectedValue {
+			if actualValues[index] != expectedValue[index] {
+				return false
+			}
+		}
+		return true
+	default:
+		actualJSON, actualErr := json.Marshal(actual)
+		expectedJSON, expectedErr := json.Marshal(expected)
+		return actualErr == nil && expectedErr == nil && string(actualJSON) == string(expectedJSON)
+	}
+}
+
+func mediaInfoNumber(value any) (float64, bool) {
+	switch value.(type) {
+	case json.Number, float64, float32, int, int32, int64, uint, uint32, uint64:
+		number, err := strconv.ParseFloat(fmt.Sprint(value), 64)
+		return number, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func shouldRetryWithMinimalMetadata(err error) bool {
@@ -2425,6 +2973,17 @@ func compatibilityMetadataPayload(raw map[string]any) map[string]any {
 	}
 	if _, ok := out["ProviderIds"]; !ok {
 		out["ProviderIds"] = map[string]string{}
+	}
+	return out
+}
+
+func payloadWithoutMediaInfo(raw map[string]any) map[string]any {
+	out := make(map[string]any, len(raw))
+	for key, value := range raw {
+		if isMediaInfoField(key) {
+			continue
+		}
+		out[key] = value
 	}
 	return out
 }
@@ -2532,14 +3091,14 @@ func allowedImageTypes(imageTypes []string) map[string]bool {
 	return allowed
 }
 
-func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath string) {
+func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath string, importMediaInfo ...bool) bool {
 	var info storage.ItemInfo
 	infoPath, err := safePackagePath(exportPath, entry.InfoPath)
 	if err != nil {
-		return
+		return false
 	}
 	if err := storage.ReadJSON(infoPath, &info); err != nil {
-		return
+		return false
 	}
 	source := info.Item
 	payload := map[string]any{}
@@ -2588,7 +3147,162 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 	} else {
 		payload["ProviderIds"] = map[string]string{}
 	}
+	mediaInfoIncluded := false
+	if len(importMediaInfo) > 0 && importMediaInfo[0] {
+		if mediaPayload := sanitizedMediaInfoPayload(source, entry, exportPath); len(mediaPayload) > 0 {
+			for key, value := range mediaPayload {
+				payload[key] = value
+			}
+			mediaInfoIncluded = true
+		}
+	}
 	current.Raw = payload
+	return mediaInfoIncluded
+}
+
+func sanitizedMediaInfoPayload(source emby.Item, entry storage.ItemEntry, exportPath string) map[string]any {
+	rawPayloads := make([]map[string]any, 0, 3)
+	if source.Raw != nil {
+		rawPayloads = append(rawPayloads, source.Raw)
+		if nested, ok := source.Raw["Raw"].(map[string]any); ok {
+			rawPayloads = append(rawPayloads, nested)
+		}
+	}
+	if strings.TrimSpace(entry.RawPath) != "" {
+		if rawPath, err := safePackagePath(exportPath, entry.RawPath); err == nil {
+			var raw map[string]any
+			if err := storage.ReadJSON(rawPath, &raw); err == nil && len(raw) > 0 {
+				rawPayloads = append(rawPayloads, raw)
+			}
+		}
+	}
+
+	sources := firstObjectSlice(source.MediaSources)
+	streams := firstObjectSlice(source.MediaStreams)
+	chapters := firstObjectSlice(source.Chapters)
+	for _, raw := range rawPayloads {
+		if len(sources) == 0 {
+			sources = objectSliceField(raw, "MediaSources")
+		}
+		if len(streams) == 0 {
+			streams = objectSliceField(raw, "MediaStreams")
+		}
+		if len(chapters) == 0 {
+			chapters = objectSliceField(raw, "Chapters")
+		}
+	}
+	streams = uniqueObjectSlice(append(append([]map[string]any(nil), streams...), mediaStreamsFromSources(sources)...))
+
+	out := map[string]any{}
+	if sanitized := sanitizeMediaSources(sources); len(sanitized) > 0 {
+		out["MediaSources"] = sanitized
+	}
+	if sanitized := sanitizeMediaStreams(streams); len(sanitized) > 0 {
+		out["MediaStreams"] = sanitized
+	}
+	if sanitized := sanitizeChapters(chapters); len(sanitized) > 0 {
+		out["Chapters"] = sanitized
+	}
+	return out
+}
+
+func sanitizeMediaSources(values []map[string]any) []map[string]any {
+	allowed := stringSet(
+		"Protocol", "Container", "Size", "Name", "RunTimeTicks", "Bitrate",
+		"VideoType", "IsoType", "Video3DFormat", "DefaultAudioStreamIndex",
+		"DefaultSubtitleStreamIndex", "MediaStreams", "Formats",
+	)
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if sanitized := sanitizeMediaInfoMap(value, allowed, true); len(sanitized) > 0 {
+			out = append(out, sanitized)
+		}
+	}
+	return out
+}
+
+func sanitizeMediaStreams(values []map[string]any) []map[string]any {
+	allowed := stringSet(
+		"Codec", "Language", "TimeBase", "CodecTimeBase", "Title", "VideoRange",
+		"VideoRangeType", "VideoDoViTitle", "DisplayTitle", "NalLengthSize",
+		"IsInterlaced", "IsAVC", "ChannelLayout", "BitRate", "BitDepth", "RefFrames",
+		"PacketLength", "Channels", "SampleRate", "IsDefault", "IsForced", "Height",
+		"Width", "AverageFrameRate", "RealFrameRate", "Profile", "Type", "AspectRatio",
+		"Index", "Score", "IsExternal", "IsTextSubtitleStream", "SupportsExternalStream",
+		"PixelFormat", "Level", "IsAnamorphic", "ColorPrimaries", "ColorSpace",
+		"ColorTransfer", "DvVersionMajor", "DvVersionMinor", "DvProfile", "DvLevel",
+		"RpuPresentFlag", "ElPresentFlag", "BlPresentFlag", "DvBlSignalCompatibilityId",
+		"Rotation", "Comment",
+	)
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if sanitized := sanitizeMediaInfoMap(value, allowed, false); len(sanitized) > 0 {
+			out = append(out, sanitized)
+		}
+	}
+	return out
+}
+
+func sanitizeChapters(values []map[string]any) []map[string]any {
+	allowed := stringSet("StartPositionTicks", "Name", "ImageTag", "MarkerType", "ChapterIndex")
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if sanitized := sanitizeMediaInfoMap(value, allowed, false); len(sanitized) > 0 {
+			out = append(out, sanitized)
+		}
+	}
+	return out
+}
+
+func sanitizeMediaInfoMap(value map[string]any, allowed map[string]bool, allowStreams bool) map[string]any {
+	out := make(map[string]any, len(value))
+	for key, rawValue := range value {
+		if !allowed[strings.ToLower(strings.TrimSpace(key))] {
+			continue
+		}
+		if strings.EqualFold(key, "MediaStreams") {
+			if !allowStreams {
+				continue
+			}
+			if streams := sanitizeMediaStreams(objectSliceFromAny(rawValue)); len(streams) > 0 {
+				out[key] = streams
+			}
+			continue
+		}
+		if sanitized, ok := sanitizeMediaScalarOrSlice(rawValue); ok {
+			out[key] = sanitized
+		}
+	}
+	return out
+}
+
+func sanitizeMediaScalarOrSlice(value any) (any, bool) {
+	switch v := value.(type) {
+	case nil:
+		return nil, false
+	case string, bool, json.Number, float64, float32, int, int32, int64, uint, uint32, uint64:
+		return value, true
+	case []string:
+		return append([]string(nil), v...), len(v) > 0
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			if sanitized, ok := sanitizeMediaScalarOrSlice(item); ok {
+				out = append(out, sanitized)
+			}
+		}
+		return out, len(out) > 0
+	default:
+		return nil, false
+	}
+}
+
+func stringSet(values ...string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		out[strings.ToLower(value)] = true
+	}
+	return out
 }
 
 func copyCurrentUpdateContext(target map[string]any, current map[string]any) {
@@ -3152,16 +3866,38 @@ func stringSetsOverlap(a map[string]bool, b map[string]bool) bool {
 
 func exactNameMatches(items []emby.Item, name string, itemType string) []emby.Item {
 	name = strings.TrimSpace(name)
-	matches := make([]emby.Item, 0)
+	strictMatches := make([]emby.Item, 0)
+	portableMatches := make([]emby.Item, 0)
+	portableName := portableMatchName(name)
 	for _, item := range items {
 		if itemType != "" && item.Type != "" && item.Type != itemType {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(item.Name), name) {
-			matches = append(matches, item)
+		itemName := strings.TrimSpace(item.Name)
+		if strings.EqualFold(itemName, name) {
+			strictMatches = append(strictMatches, item)
+			continue
+		}
+		if portableName != "" && portableMatchName(itemName) == portableName {
+			portableMatches = append(portableMatches, item)
 		}
 	}
-	return matches
+	if len(strictMatches) > 0 {
+		return strictMatches
+	}
+	return portableMatches
+}
+
+func portableMatchName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	normalized := storage.Slug(value)
+	if normalized == "unknown" {
+		return ""
+	}
+	return normalized
 }
 
 func originalTitleMatches(items []emby.Item, title string, itemType string) []emby.Item {

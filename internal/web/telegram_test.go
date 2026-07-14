@@ -379,7 +379,7 @@ func TestTelegramJobTerminalNotificationUsesFakeAPI(t *testing.T) {
 			},
 		},
 	}
-	if err := app.sendTelegramJobTerminalNotification(contextForTest(t), snapshot, nil); err != nil {
+	if err := app.sendTelegramJobTerminalNotification(contextForTest(t), &snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,7 +418,7 @@ func TestTelegramJobNotificationUsesChineseLabelsForTerminalStates(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			text := formatTelegramJobNotification(job.Job{
+			text := formatTelegramJobNotification(&job.Job{
 				Type:   tt.jobType,
 				Status: tt.status,
 				Error:  "sample error",
@@ -438,7 +438,7 @@ func TestTelegramJobNotificationUsesChineseLabelsForTerminalStates(t *testing.T)
 }
 
 func TestTelegramJobNotificationFriendlyExportPackageError(t *testing.T) {
-	text := formatTelegramJobNotification(job.Job{
+	text := formatTelegramJobNotification(&job.Job{
 		Type:   "import-precheck",
 		Status: job.StatusFailed,
 		Error:  "export package not found: definitely-missing-export-package",
@@ -458,7 +458,7 @@ func TestTelegramJobNotificationFriendlyExportPackageError(t *testing.T) {
 }
 
 func TestTelegramJobNotificationIncludesServerAddresses(t *testing.T) {
-	exportText := formatTelegramJobNotification(job.Job{
+	exportText := formatTelegramJobNotification(&job.Job{
 		Type:   "export",
 		Status: job.StatusDone,
 		Result: map[string]any{
@@ -475,7 +475,7 @@ func TestTelegramJobNotificationIncludesServerAddresses(t *testing.T) {
 		t.Fatalf("export notification should not include target server:\n%s", exportText)
 	}
 
-	importText := formatTelegramJobNotification(job.Job{
+	importText := formatTelegramJobNotification(&job.Job{
 		Type:   "import",
 		Status: job.StatusDone,
 		Result: map[string]any{
@@ -497,7 +497,7 @@ func TestTelegramJobNotificationIncludesServerAddresses(t *testing.T) {
 		}
 	}
 
-	precheckText := formatTelegramJobNotification(job.Job{
+	precheckText := formatTelegramJobNotification(&job.Job{
 		Type:   "import-precheck",
 		Status: job.StatusDone,
 		Result: map[string]any{

@@ -32,13 +32,16 @@ type appConnectionSettings struct {
 }
 
 type appServerProfileSettings struct {
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	BaseURL   string `json:"baseUrl,omitempty"`
-	APIKey    string `json:"apiKey,omitempty"`
-	Role      string `json:"role,omitempty"`
-	CreatedAt string `json:"createdAt,omitempty"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	ID                  string `json:"id,omitempty"`
+	Name                string `json:"name,omitempty"`
+	BaseURL             string `json:"baseUrl,omitempty"`
+	APIKey              string `json:"apiKey,omitempty"`
+	DatabasePath        string `json:"databasePath,omitempty"`
+	ContainerName       string `json:"containerName,omitempty"`
+	AutoManageContainer bool   `json:"autoManageContainer,omitempty"`
+	Role                string `json:"role,omitempty"`
+	CreatedAt           string `json:"createdAt,omitempty"`
+	UpdatedAt           string `json:"updatedAt,omitempty"`
 }
 
 type appTaskDefaultSettings struct {
@@ -80,22 +83,28 @@ type appConnectionSettingsMasked struct {
 }
 
 type appServerProfileResponse struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	BaseURL      string `json:"baseUrl,omitempty"`
-	Role         string `json:"role,omitempty"`
-	HasAPIKey    bool   `json:"hasApiKey"`
-	APIKeyMasked string `json:"apiKeyMasked,omitempty"`
-	CreatedAt    string `json:"createdAt,omitempty"`
-	UpdatedAt    string `json:"updatedAt,omitempty"`
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	BaseURL             string `json:"baseUrl,omitempty"`
+	Role                string `json:"role,omitempty"`
+	HasAPIKey           bool   `json:"hasApiKey"`
+	APIKeyMasked        string `json:"apiKeyMasked,omitempty"`
+	DatabasePath        string `json:"databasePath,omitempty"`
+	ContainerName       string `json:"containerName,omitempty"`
+	AutoManageContainer bool   `json:"autoManageContainer"`
+	CreatedAt           string `json:"createdAt,omitempty"`
+	UpdatedAt           string `json:"updatedAt,omitempty"`
 }
 
 type appProfileSaveRequest struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
-	Role    string `json:"role"`
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	BaseURL             string `json:"baseUrl"`
+	APIKey              string `json:"apiKey"`
+	DatabasePath        string `json:"databasePath"`
+	ContainerName       string `json:"containerName"`
+	AutoManageContainer bool   `json:"autoManageContainer"`
+	Role                string `json:"role"`
 }
 
 type appProfileSelectRequest struct {
@@ -270,11 +279,14 @@ func (s *Server) settingsFromRequest(req appSettingsRequest) (appSettings, error
 	}
 	if appSettingsProfilePresent(req.Profile) {
 		profileReq := appProfileSaveRequest{
-			ID:      req.Profile.ID,
-			Name:    req.Profile.Name,
-			BaseURL: req.Profile.BaseURL,
-			APIKey:  req.Profile.APIKey,
-			Role:    req.Profile.Role,
+			ID:                  req.Profile.ID,
+			Name:                req.Profile.Name,
+			BaseURL:             req.Profile.BaseURL,
+			APIKey:              req.Profile.APIKey,
+			DatabasePath:        req.Profile.DatabasePath,
+			ContainerName:       req.Profile.ContainerName,
+			AutoManageContainer: req.Profile.AutoManageContainer,
+			Role:                req.Profile.Role,
 		}
 		if strings.TrimSpace(profileReq.BaseURL) == "" {
 			profileReq.BaseURL = normalizedBaseURL
@@ -523,6 +535,10 @@ func normalizedProfileFromSave(req appProfileSaveRequest, existing []appServerPr
 	if name == "" {
 		name = defaultProfileName(normalizedBaseURL)
 	}
+	containerName := strings.TrimSpace(req.ContainerName)
+	if req.AutoManageContainer && containerName == "" {
+		return appServerProfileSettings{}, fmt.Errorf("启用自动停启 Emby 前，请填写目标容器名称")
+	}
 	if current.ID != "" && current.BaseURL == normalizedBaseURL {
 		id = current.ID
 	}
@@ -534,13 +550,16 @@ func normalizedProfileFromSave(req appProfileSaveRequest, existing []appServerPr
 		createdAt = now
 	}
 	return appServerProfileSettings{
-		ID:        id,
-		Name:      name,
-		BaseURL:   normalizedBaseURL,
-		APIKey:    apiKey,
-		Role:      normalizeProfileRole(req.Role),
-		CreatedAt: createdAt,
-		UpdatedAt: now,
+		ID:                  id,
+		Name:                name,
+		BaseURL:             normalizedBaseURL,
+		APIKey:              apiKey,
+		DatabasePath:        strings.TrimSpace(req.DatabasePath),
+		ContainerName:       containerName,
+		AutoManageContainer: req.AutoManageContainer,
+		Role:                normalizeProfileRole(req.Role),
+		CreatedAt:           createdAt,
+		UpdatedAt:           now,
 	}, nil
 }
 
@@ -552,6 +571,8 @@ func normalizeProfiles(profiles []appServerProfileSettings) []appServerProfileSe
 		profile.Name = strings.TrimSpace(profile.Name)
 		profile.BaseURL = strings.TrimSpace(profile.BaseURL)
 		profile.APIKey = strings.TrimSpace(profile.APIKey)
+		profile.DatabasePath = strings.TrimSpace(profile.DatabasePath)
+		profile.ContainerName = strings.TrimSpace(profile.ContainerName)
 		profile.Role = normalizeProfileRole(profile.Role)
 		if profile.ID == "" || profile.BaseURL == "" || profile.APIKey == "" || seen[profile.ID] {
 			continue
@@ -586,6 +607,9 @@ func appSettingsProfilePresent(profile appServerProfileSettings) bool {
 	return strings.TrimSpace(profile.Name) != "" ||
 		strings.TrimSpace(profile.BaseURL) != "" ||
 		strings.TrimSpace(profile.APIKey) != "" ||
+		strings.TrimSpace(profile.DatabasePath) != "" ||
+		strings.TrimSpace(profile.ContainerName) != "" ||
+		profile.AutoManageContainer ||
 		strings.TrimSpace(profile.Role) != ""
 }
 
@@ -594,14 +618,17 @@ func profilesToResponse(profiles []appServerProfileSettings) []appServerProfileR
 	for _, profile := range profiles {
 		apiKey := strings.TrimSpace(profile.APIKey)
 		out = append(out, appServerProfileResponse{
-			ID:           profile.ID,
-			Name:         profile.Name,
-			BaseURL:      profile.BaseURL,
-			Role:         profile.Role,
-			HasAPIKey:    apiKey != "",
-			APIKeyMasked: emby.MaskAPIKey(apiKey),
-			CreatedAt:    profile.CreatedAt,
-			UpdatedAt:    profile.UpdatedAt,
+			ID:                  profile.ID,
+			Name:                profile.Name,
+			BaseURL:             profile.BaseURL,
+			Role:                profile.Role,
+			HasAPIKey:           apiKey != "",
+			APIKeyMasked:        emby.MaskAPIKey(apiKey),
+			DatabasePath:        profile.DatabasePath,
+			ContainerName:       profile.ContainerName,
+			AutoManageContainer: profile.AutoManageContainer,
+			CreatedAt:           profile.CreatedAt,
+			UpdatedAt:           profile.UpdatedAt,
 		})
 	}
 	return out

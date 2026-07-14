@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Emby Migrator</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=1.0.0" />
-    <script src="./assets/app.js?v=1.0.0" defer></script>
+    <link rel="stylesheet" href="./assets/styles.css?v=1.1.0" />
+    <script src="./assets/app.js?v=1.1.0" defer></script>
   </head>
   <body>
     <section class="auth-gate is-hidden" id="authGate" aria-labelledby="authTitle">
@@ -80,7 +80,7 @@
           <p class="eyebrow">Emby 元数据迁移工具</p>
           <div class="brand-row">
             <h1>Emby Migrator</h1>
-            <span class="version-badge" id="appVersion">v1.0.0</span>
+            <span class="version-badge" id="appVersion">v1.1.0</span>
           </div>
         </div>
         <div class="header-actions">
@@ -106,7 +106,7 @@
           </div>
 
           <form id="connectionForm" class="form-grid">
-            <label class="field span-2">
+            <label class="field">
               <span>Emby 地址</span>
               <input
                 id="serverUrl"
@@ -119,7 +119,7 @@
               />
             </label>
 
-            <label class="field span-2">
+            <label class="field">
               <span>API Key</span>
               <input
                 id="apiKey"
@@ -146,24 +146,6 @@
               </button>
             </div>
 
-            <div class="profile-section span-2" aria-labelledby="profilesTitle">
-              <div class="profile-grid">
-                <div class="profile-save-cell">
-                  <span id="profilesTitle">服务器地址簿</span>
-                  <button type="button" class="button" id="saveAppSettingsBtn">
-                    保存服务器
-                  </button>
-                </div>
-                <label class="field">
-                  <span>导出服务器（旧库）</span>
-                  <select id="sourceProfileSelect"></select>
-                </label>
-                <label class="field">
-                  <span>导入服务器（新库）</span>
-                  <select id="targetProfileSelect"></select>
-                </label>
-              </div>
-            </div>
           </form>
 
           <div class="notice" id="connectionNotice" role="status" aria-live="polite">
@@ -234,6 +216,96 @@
           <div class="notice is-hidden" id="telegramNotice" role="status" aria-live="polite"></div>
         </section>
 
+        <section class="panel server-management-panel" aria-labelledby="serverManagementTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="serverManagementTitle">服务器与媒体恢复</h2>
+              <p>选择迁移方向；数据库只会从已挂载到本项目的目标 Emby 配置目录中识别。</p>
+            </div>
+          </div>
+
+          <div class="server-management-layout">
+            <div class="profile-section" aria-labelledby="profilesTitle">
+              <div class="media-runtime-heading">
+                <strong>迁移服务器</strong>
+                <small>保存连接与选择迁移方向</small>
+              </div>
+              <div class="profile-grid">
+                <div class="field profile-save-cell">
+                  <span id="profilesTitle">当前连接</span>
+                  <button type="button" class="button" id="saveAppSettingsBtn">
+                    保存服务器
+                  </button>
+                  <small class="field-hint">保存当前地址与 Key。</small>
+                </div>
+                <label class="field">
+                  <span>导出服务器（旧库）</span>
+                  <select id="sourceProfileSelect"></select>
+                </label>
+                <label class="field">
+                  <span>导入服务器（新库）</span>
+                  <select id="targetProfileSelect"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="media-runtime-settings">
+              <div class="media-runtime-heading">
+                <strong>媒体信息恢复</strong>
+                <small>数据库识别与容器控制</small>
+              </div>
+              <div class="media-runtime-grid">
+                <div class="field database-field">
+                  <span id="embyDatabasePathLabel">目标数据库</span>
+                  <div class="database-picker">
+                    <select
+                      id="embyDatabasePath"
+                      name="embyDatabasePath"
+                      aria-labelledby="embyDatabasePathLabel"
+                    >
+                      <option value="">请先选择目标服务器</option>
+                    </select>
+                    <button type="button" class="button" id="refreshEmbyDatabasesBtn">
+                      检测
+                    </button>
+                  </div>
+                  <small class="field-hint" id="embyDatabaseHint" aria-live="polite">
+                    远程 Emby 需在其主机部署本项目或挂载 config。
+                  </small>
+                </div>
+
+                <label class="field container-name-field">
+                  <span>Emby 容器</span>
+                  <input
+                    id="embyContainerName"
+                    name="embyContainerName"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="例如：emby"
+                  />
+                  <small class="field-hint">识别成功后自动填入。</small>
+                </label>
+
+                <div class="field auto-manage-field">
+                  <span>容器控制</span>
+                  <label class="container-toggle-field">
+                    <span class="container-toggle-copy">
+                      <strong>自动停启</strong>
+                      <small>停止、写库、启动并回读</small>
+                    </span>
+                    <span class="switch-control">
+                      <input type="checkbox" id="autoManageContainer" />
+                      <span class="switch-track" aria-hidden="true"></span>
+                    </span>
+                  </label>
+                  <small class="field-hint">需要挂载 Docker Socket。</small>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section class="panel libraries-panel" aria-labelledby="librariesTitle">
           <div class="panel-heading with-action">
             <div>
@@ -301,6 +373,14 @@
                     <strong>人物头像</strong>
                     <small class="option-code">includePeopleImages</small>
                     <small>导出演员、导演等人物头像。</small>
+                  </span>
+                </label>
+                <label class="option">
+                  <input type="checkbox" id="exportIncludeMediaInfo" checked />
+                  <span>
+                    <strong>媒体技术信息</strong>
+                    <small class="option-code">includeMediaInfo</small>
+                    <small>保存 MediaSources、MediaStreams 和 Chapters。</small>
                   </span>
                 </label>
               </fieldset>
@@ -392,6 +472,14 @@
                     <small>导入演员、导演等人物头像。</small>
                   </span>
                 </label>
+                <label class="option">
+                  <input type="checkbox" id="importMediaInfo" checked />
+                  <span>
+                    <strong>媒体技术信息</strong>
+                    <small class="option-code">importMediaInfo</small>
+                    <small>尝试回写技术信息，失败会自动降级且不影响普通元数据。</small>
+                  </span>
+                </label>
               </fieldset>
             </div>
 
@@ -423,6 +511,9 @@
             </button>
             <button type="button" class="button primary" id="startImportBtn" disabled>
               开始导入
+            </button>
+            <button type="button" class="button" id="applyMediaDatabaseBtn" disabled>
+              应用媒体信息计划
             </button>
           </div>
 
