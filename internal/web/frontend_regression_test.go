@@ -13,8 +13,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 	app := readFrontendFile(t, "assets", "app.js")
 
 	for _, marker := range []string{
-		`./assets/styles.css?v=1.1.2`,
-		`./assets/app.js?v=1.1.2`,
+		`./assets/styles.css?v=1.1.3`,
+		`./assets/app.js?v=1.1.3`,
 		"https://github.com/czppw/emby-migrator",
 		"https://hub.docker.com/r/czppwa/emby-migrator",
 		"License: AGPL-3.0-or-later",

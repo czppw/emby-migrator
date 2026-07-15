@@ -4,11 +4,30 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"emby-migrator/internal/config"
 	"emby-migrator/internal/exporter"
 	"emby-migrator/internal/job"
 )
+
+func TestVersionCheckCachePolicy(t *testing.T) {
+	if versionCheckSuccessTTL != time.Hour {
+		t.Fatalf("success cache TTL = %s, want 1h", versionCheckSuccessTTL)
+	}
+	if versionCheckFailureTTL != 15*time.Minute {
+		t.Fatalf("failure cache TTL = %s, want 15m", versionCheckFailureTTL)
+	}
+
+	server := NewServer(config.Config{Version: "1.1.3"}, job.NewManager(), exporter.NewService(t.TempDir()))
+	server.versionCheck.result = versionCheckResponse{Checked: true, CurrentVersion: "1.1.3", LatestVersion: "1.1.3"}
+	server.versionCheck.expiresAt = time.Now().Add(time.Hour)
+	recorder := httptest.NewRecorder()
+	server.handleVersionCheck(recorder, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}
 
 func TestVersionCheckReportsNewStableReleaseAndCaches(t *testing.T) {
 	requests := 0

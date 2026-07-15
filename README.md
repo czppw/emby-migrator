@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-czppw%2Femby--migrator-111827?style=for-the-badge&logo=github)](https://github.com/czppw/emby-migrator)
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-czppwa%2Femby--migrator-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/czppwa/emby-migrator)
-![Version](https://img.shields.io/badge/version-v1.1.2-315CF6?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v1.1.3-315CF6?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-22C55E?style=for-the-badge)
 
 # Emby Migrator
@@ -96,7 +96,7 @@ docker run -d \
 如果想固定正式版：
 
 ```bash
-czppwa/emby-migrator:v1.1.2
+czppwa/emby-migrator:v1.1.3
 ```
 
 ### 3. 打开网页

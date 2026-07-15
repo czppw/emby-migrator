@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	versionCheckSuccessTTL = 6 * time.Hour
+	versionCheckSuccessTTL = time.Hour
 	versionCheckFailureTTL = 15 * time.Minute
 )
 
@@ -41,6 +41,7 @@ type githubLatestRelease struct {
 }
 
 func (s *Server) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, s.checkLatestVersion())
 }
 
