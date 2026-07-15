@@ -48,6 +48,22 @@ type passwordChangeResponse struct {
 	OK bool `json:"ok"`
 }
 
+type usernameChangeRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewUsername     string `json:"newUsername"`
+}
+
+type usernameChangeResponse struct {
+	OK       bool   `json:"ok"`
+	Username string `json:"username"`
+}
+
+type accountChangeRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewUsername     string `json:"newUsername"`
+	NewPassword     string `json:"newPassword"`
+}
+
 type sessionPayload struct {
 	Expires  int64  `json:"exp"`
 	Nonce    string `json:"nonce"`
@@ -136,6 +152,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	s.clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -145,7 +166,6 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Secure:   r.TLS != nil,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +191,52 @@ func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, passwordChangeResponse{OK: true})
+}
+
+func (s *Server) handleAuthUsernameChange(w http.ResponseWriter, r *http.Request) {
+	principal, ok := currentPrincipal(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, fmt.Errorf("not logged in"))
+		return
+	}
+	var req usernameChangeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	username, err := s.changeCurrentUsername(principal.Username, req.CurrentPassword, req.NewUsername)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "invalid current password") {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
+		return
+	}
+	s.clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, usernameChangeResponse{OK: true, Username: username})
+}
+
+func (s *Server) handleAuthAccountChange(w http.ResponseWriter, r *http.Request) {
+	principal, ok := currentPrincipal(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, fmt.Errorf("not logged in"))
+		return
+	}
+	var req accountChangeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	username, err := s.changeCurrentAccount(principal.Username, req.CurrentPassword, req.NewUsername, req.NewPassword)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "invalid current password") {
+			status = http.StatusUnauthorized
+		}
+		writeError(w, status, err)
+		return
+	}
+	s.clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, usernameChangeResponse{OK: true, Username: username})
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {
@@ -253,7 +319,10 @@ func (s *Server) sessionPrincipal(r *http.Request) (authPrincipal, bool) {
 		return authPrincipal{}, false
 	}
 	if principal, ok := sessionPayloadPrincipal(payloadBytes); ok {
-		return principal, true
+		if s.principalActive(principal) {
+			return principal, true
+		}
+		return authPrincipal{}, false
 	}
 	return s.legacySessionPrincipal(payloadBytes)
 }

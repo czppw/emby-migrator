@@ -106,6 +106,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	mux.Handle("POST /api/auth/password", s.requireAuth(http.HandlerFunc(s.handleAuthPasswordChange)))
+	mux.Handle("POST /api/auth/username", s.requireAuth(http.HandlerFunc(s.handleAuthUsernameChange)))
+	mux.Handle("POST /api/auth/account", s.requireAuth(http.HandlerFunc(s.handleAuthAccountChange)))
 	mux.Handle("POST /api/connection/test", s.requireRole(roleOperator, http.HandlerFunc(s.handleConnectionTest)))
 	mux.Handle("POST /api/libraries", s.requireRole(roleOperator, http.HandlerFunc(s.handleLibraries)))
 	mux.Handle("GET /api/settings/app", s.requireRole(roleViewer, http.HandlerFunc(s.handleAppSettingsGet)))

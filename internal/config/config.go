@@ -31,7 +31,7 @@ func FromEnv() Config {
 		ImportRoot:            env("EMBY_MIGRATOR_IMPORT_ROOT", "/imports"),
 		EmbyDatabaseRoot:      strings.TrimSpace(os.Getenv("EMBY_MIGRATOR_EMBY_DB_ROOT")),
 		DockerHost:            env("EMBY_MIGRATOR_DOCKER_HOST", "unix:///var/run/docker.sock"),
-		Version:               env("EMBY_MIGRATOR_VERSION", "1.1.1"),
+		Version:               env("EMBY_MIGRATOR_VERSION", "1.1.2"),
 		AdminPassword:         env("EMBY_MIGRATOR_PASSWORD", "password"),
 		SessionSecret:         os.Getenv("EMBY_MIGRATOR_SESSION_SECRET"),
 		MaxMemoryLogEntries:   envInt("EMBY_MIGRATOR_MAX_MEMORY_LOGS", 2000),

@@ -28,6 +28,7 @@
   const THEME_STORAGE_KEY = "embyMigratorTheme";
   const CONNECTION_STORAGE_KEY = "embyMigrator.connection";
   const TASK_PREFS_STORAGE_KEY = "embyMigrator.taskPrefs";
+  const USERNAME_STORAGE_KEY = "embyMigrator.loginUsername";
   const TASK_PREFS_SCHEMA_VERSION = 2;
   const LEGACY_SERVER_URL_KEY = "embyMigrator.serverUrl";
   const DEFAULT_CONCURRENCY = 4;
@@ -117,6 +118,7 @@
     cacheElements();
     retireLegacyUserManagementUI();
     initTheme();
+    restoreLoginUsername();
     renderImageTypes("exportImageTypes", "export");
     renderImageTypes("importImageTypes", "import");
     restoreConnection();
@@ -147,15 +149,15 @@
       "versionUpdate",
       "currentUserBadge",
       "logoutBtn",
-      "changePasswordToggleBtn",
-      "showPasswordFormBtn",
       "themeToggleBtn",
-      "changePasswordForm",
-      "oldPassword",
-      "newPassword",
-      "changePasswordBtn",
-      "cancelChangePasswordBtn",
-      "changePasswordNotice",
+      "accountSettingsForm",
+      "currentAccountName",
+      "accountNewUsername",
+      "accountNewPassword",
+      "accountConfirmPassword",
+      "accountCurrentPassword",
+      "saveAccountSettingsBtn",
+      "accountSettingsNotice",
       "serverUrl",
       "apiKey",
       "apiKeyHint",
@@ -247,10 +249,7 @@
   function bindEvents() {
     els.authForm.addEventListener("submit", handleLogin);
     els.logoutBtn.addEventListener("click", handleLogout);
-    els.changePasswordToggleBtn?.addEventListener("click", showChangePasswordForm);
-    els.showPasswordFormBtn?.addEventListener("click", showChangePasswordForm);
-    els.cancelChangePasswordBtn.addEventListener("click", hideChangePasswordForm);
-    els.changePasswordForm.addEventListener("submit", handleChangePassword);
+    els.accountSettingsForm?.addEventListener("submit", handleSaveAccountSettings);
     els.themeToggleBtn.addEventListener("click", handleThemeToggle);
     els.connectionForm.addEventListener("submit", handleConnectionTest);
     els.saveAppSettingsBtn.addEventListener("click", handleSaveAppSettings);
@@ -336,6 +335,9 @@
       state.authenticated = Boolean(data.authenticated);
       state.user = String(readFirst(data, ["user", "username", "User", "Username"]) || "");
       state.role = normalizeRole(readFirst(data, ["role", "Role"]));
+      if (state.authenticated && state.user) {
+        rememberLoginUsername(state.user);
+      }
       setAppVersion(readFirst(data, ["toolVersion", "ToolVersion", "version", "Version"]));
       applyAuthState(data.warning || "");
       if (state.authenticated) {
@@ -358,8 +360,8 @@
     event.preventDefault();
     const username = els.authUsername ? els.authUsername.value.trim() : "";
     const password = els.authPassword.value;
-    if (!password) {
-      setNotice(els.authNotice, "请输入访问密码。", "error");
+    if (!username || !password) {
+      setNotice(els.authNotice, "请输入账号和访问密码。", "error");
       return;
     }
     setButtonBusy("authLogin", els.authLoginBtn, true, "登录中");
@@ -367,9 +369,7 @@
       const data = await postJson("/api/auth/login", { username, password });
       state.user = String(readFirst(data, ["user", "username", "User", "Username"]) || username || "admin");
       state.role = normalizeRole(readFirst(data, ["role", "Role"]) || "admin");
-      if (els.authUsername) {
-        els.authUsername.value = "";
-      }
+      rememberLoginUsername(state.user);
       els.authPassword.value = "";
       state.authenticated = true;
       applyAuthState("");
@@ -391,6 +391,10 @@
     } catch {
       // Ignore logout transport errors and lock the page locally.
     }
+    resetAuthenticatedState();
+  }
+
+  function resetAuthenticatedState() {
     state.authenticated = !state.authEnabled;
     state.user = "";
     state.role = "";
@@ -398,7 +402,6 @@
     state.jobs = [];
     renderAppSettings({});
     renderTelegramSettings({});
-    hideChangePasswordForm();
     renderJobList();
     closeLogStream();
     stopPolling();
@@ -406,45 +409,37 @@
     updateControls();
   }
 
-  function showChangePasswordForm() {
-    els.changePasswordForm.classList.remove("is-hidden");
-    setNotice(els.changePasswordNotice, "");
-    els.oldPassword.focus();
-  }
-
-  function hideChangePasswordForm() {
-    if (!els.changePasswordForm) {
-      return;
-    }
-    els.changePasswordForm.classList.add("is-hidden");
-    if (els.oldPassword) {
-      els.oldPassword.value = "";
-    }
-    if (els.newPassword) {
-      els.newPassword.value = "";
-    }
-    setNotice(els.changePasswordNotice, "");
-  }
-
-  async function handleChangePassword(event) {
+  async function handleSaveAccountSettings(event) {
     event.preventDefault();
-    const oldPassword = els.oldPassword.value;
-    const newPassword = els.newPassword.value;
-    if (!oldPassword || !newPassword) {
-      setNotice(els.changePasswordNotice, "请输入当前密码和新密码。", "error");
+    const currentUsername = state.user || "admin";
+    const newUsername = els.accountNewUsername.value.trim();
+    const newPassword = els.accountNewPassword.value;
+    const confirmPassword = els.accountConfirmPassword.value;
+    const currentPassword = els.accountCurrentPassword.value;
+    if (!newUsername || !currentPassword) {
+      setNotice(els.accountSettingsNotice, "请输入新账号和当前密码。", "error");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setNotice(els.accountSettingsNotice, "两次输入的新密码不一致。", "error");
+      return;
+    }
+    if (newUsername.toLocaleLowerCase() === currentUsername.toLocaleLowerCase() && !newPassword) {
+      setNotice(els.accountSettingsNotice, "账号和密码均未修改。", "error");
       return;
     }
 
-    setButtonBusy("changePassword", els.changePasswordBtn, true, "保存中");
+    setButtonBusy("saveAccountSettings", els.saveAccountSettingsBtn, true, "保存中");
     try {
-      await postJson("/api/auth/password", { oldPassword, newPassword });
-      setNotice(els.changePasswordNotice, "密码已修改。", "ok");
-      els.oldPassword.value = "";
-      els.newPassword.value = "";
+      const data = await postJson("/api/auth/account", { currentPassword, newUsername, newPassword });
+      const savedUsername = String(data.username || newUsername).trim();
+      rememberLoginUsername(savedUsername);
+      resetAuthenticatedState();
+      setNotice(els.authNotice, "账号信息已更新，请使用新凭据重新登录。", "ok");
     } catch (error) {
-      setNotice(els.changePasswordNotice, `修改密码失败：${error.message}`, "error");
+      setNotice(els.accountSettingsNotice, `保存失败：${error.message}`, "error");
     } finally {
-      setButtonBusy("changePassword", els.changePasswordBtn, false);
+      setButtonBusy("saveAccountSettings", els.saveAccountSettingsBtn, false);
       updateControls();
     }
   }
@@ -455,25 +450,64 @@
     els.authGate.classList.toggle("is-hidden", !locked);
     els.appShell.classList.toggle("is-locked", locked);
     els.logoutBtn.classList.toggle("is-hidden", !state.authEnabled || locked);
-    els.changePasswordToggleBtn?.classList.toggle("is-hidden", true);
-    if (!state.authEnabled || locked) {
-      hideChangePasswordForm();
-    }
     renderCurrentUser();
     els.authWarning.classList.toggle("is-hidden", !warning || locked);
     els.authWarning.textContent = warning || "";
     if (locked) {
-      setNotice(els.authNotice, "请输入访问密码。");
-      window.requestAnimationFrame(() => els.authPassword?.focus());
+      setNotice(els.authNotice, "请输入账号和访问密码。");
+      window.requestAnimationFrame(() => {
+        if (els.authUsername && !els.authUsername.value.trim()) {
+          els.authUsername.focus();
+          return;
+        }
+        els.authPassword?.focus();
+      });
     }
   }
 
   function renderCurrentUser() {
+    if (els.currentAccountName) {
+      const username = state.user || els.authUsername?.value || "admin";
+      els.currentAccountName.value = username;
+      els.accountNewUsername.value = username;
+      els.accountNewPassword.value = "";
+      els.accountConfirmPassword.value = "";
+      els.accountCurrentPassword.value = "";
+      setNotice(els.accountSettingsNotice, "");
+    }
     if (!els.currentUserBadge) {
       return;
     }
     els.currentUserBadge.classList.add("is-hidden");
     els.currentUserBadge.textContent = "";
+  }
+
+  function restoreLoginUsername() {
+    if (!els.authUsername) {
+      return;
+    }
+    let username = "admin";
+    try {
+      username = window.localStorage.getItem(USERNAME_STORAGE_KEY)?.trim() || username;
+    } catch {
+      // Storage can be unavailable in restrictive browser modes.
+    }
+    els.authUsername.value = username;
+  }
+
+  function rememberLoginUsername(username) {
+    username = String(username || "").trim();
+    if (!username) {
+      return;
+    }
+    if (els.authUsername) {
+      els.authUsername.value = username;
+    }
+    try {
+      window.localStorage.setItem(USERNAME_STORAGE_KEY, username);
+    } catch {
+      // Login remains functional when storage is unavailable.
+    }
   }
 
   function restoreConnection() {
@@ -2030,7 +2064,8 @@
       locked || !state.dockerAvailable || state.busy.has("refreshEmbyDatabases");
     els.saveTelegramBtn.disabled = locked || state.busy.has("saveTelegram");
     els.testTelegramBtn.disabled = locked || state.busy.has("testTelegram");
-    els.changePasswordBtn.disabled = locked || !state.authenticated || state.busy.has("changePassword");
+    els.saveAccountSettingsBtn.disabled =
+      locked || !state.authenticated || state.busy.has("saveAccountSettings");
     els.selectAllLibraries.disabled = locked || !hasLibraries;
     els.startExportBtn.disabled =
       locked || !canUseSourceConnection() || !hasSelectedLibraries || state.busy.has("startExport");

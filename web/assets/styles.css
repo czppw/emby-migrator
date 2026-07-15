@@ -2239,7 +2239,7 @@ body.auth-page-active .app-shell {
 
 .auth-visual-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -2256,7 +2256,7 @@ body.auth-page-active .app-shell {
 
 .auth-feature-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -2343,6 +2343,10 @@ body.auth-page-active .app-shell {
   border-color: #315cf6;
   background: #ffffff;
   box-shadow: 0 0 0 4px rgba(49, 92, 246, 0.13);
+}
+
+.auth-card > .field + .field {
+  margin-top: 14px;
 }
 
 .auth-submit {
@@ -2600,7 +2604,7 @@ body.auth-page-active .app-shell {
   }
 
   .auth-feature-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -2650,6 +2654,10 @@ body.auth-page-active .app-shell {
 
   .auth-visual-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .auth-feature-grid {
+    grid-template-columns: 1fr;
   }
 
   .auth-card {

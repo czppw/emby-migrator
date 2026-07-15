@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Emby Migrator</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=1.1.1" />
-    <script src="./assets/app.js?v=1.1.1" defer></script>
+    <link rel="stylesheet" href="./assets/styles.css?v=1.1.2" />
+    <script src="./assets/app.js?v=1.1.2" defer></script>
   </head>
   <body>
     <section class="auth-gate is-hidden" id="authGate" aria-labelledby="authTitle">
@@ -27,13 +27,14 @@
               <span>metadata</span>
               <span>poster</span>
               <span>people</span>
+              <span>media info</span>
               <span>report</span>
             </div>
           </div>
           <p class="eyebrow">Emby Migrator Console</p>
           <h1>Emby 数据迁移控制台</h1>
           <p class="auth-hero-copy">
-            把元数据、海报、人物头像与报告打包迁移。换设备、换库、重建媒体库时，少刮削、少返工。
+            把元数据、媒体技术信息、海报、人物头像与报告打包迁移。换设备、换库、重建媒体库时，少刮削、少返工。
           </p>
           <div class="auth-feature-grid">
             <div>
@@ -45,23 +46,40 @@
               <span>海报、背景图、Logo、人物头像统一备份回写。</span>
             </div>
             <div>
+              <strong>Media Info</strong>
+              <span>迁移媒体源、媒体流与章节信息，支持同版本媒体库重建。</span>
+            </div>
+            <div>
               <strong>Reports</strong>
               <span>任务总结、失败报告、差异信息与日志可追踪。</span>
             </div>
           </div>
         </aside>
 
-        <form class="auth-card" id="authForm">
+        <form class="auth-card" id="authForm" autocomplete="on">
           <div class="auth-card-header">
             <p class="eyebrow">受保护访问</p>
             <h2 id="authTitle">登录控制台</h2>
-            <p>请输入访问密码进入 Emby Migrator。</p>
+            <p>请输入账号和访问密码进入 Emby Migrator。</p>
           </div>
+          <label class="field">
+            <span>账号</span>
+            <input
+              id="authUsername"
+              name="username"
+              type="text"
+              autocomplete="username"
+              autocapitalize="none"
+              spellcheck="false"
+              placeholder="默认 admin"
+              required
+            />
+          </label>
           <label class="field">
             <span>访问密码</span>
             <input
               id="authPassword"
-              name="authPassword"
+              name="password"
               type="password"
               autocomplete="current-password"
               placeholder="默认 password"
@@ -70,17 +88,17 @@
           </label>
           <button type="submit" class="button primary auth-submit" id="authLoginBtn">登录</button>
           <div class="notice" id="authNotice" role="status" aria-live="polite"></div>
-          <p class="auth-footnote">默认密码为 password，进入后可在安全设置中修改。</p>
+          <p class="auth-footnote">默认账号为 admin，默认密码为 password。进入后可在安全设置中修改密码。</p>
         </form>
       </div>
     </section>
     <div class="app-shell" id="appShell">
       <header class="app-header">
         <div>
-          <p class="eyebrow">Emby 元数据迁移工具</p>
+          <p class="eyebrow">Emby 元数据与媒体信息迁移工具</p>
           <div class="brand-row">
             <h1>Emby Migrator</h1>
-            <span class="version-badge" id="appVersion">v1.1.1</span>
+            <span class="version-badge" id="appVersion">v1.1.2</span>
             <a
               class="version-update is-hidden"
               id="versionUpdate"
@@ -602,49 +620,64 @@
           <div class="panel-heading">
             <div>
               <h2 id="securityTitle">安全设置</h2>
-              <p>这里仅维护页面访问密码，用来保护当前迁移工具。</p>
+              <p>这里维护单用户登录账号和访问密码，用来保护当前迁移工具。</p>
             </div>
           </div>
 
-          <div class="security-shell">
-            <div class="security-note">
-              <strong>页面访问密码</strong>
-              <p>用于打开当前迁移工具，不影响 Emby 里的媒体库内容或服务器配置。</p>
-              <small>修改后，下次进入页面就使用新密码。</small>
-            </div>
-
-            <div class="actions security-primary-actions">
-              <button type="button" class="button" id="showPasswordFormBtn">修改访问密码</button>
-            </div>
-          </div>
-
-          <form id="changePasswordForm" class="form-grid security-password is-hidden">
+          <form id="accountSettingsForm" class="form-grid security-password" autocomplete="off">
             <label class="field">
-              <span>当前密码</span>
+              <span>当前账号</span>
+              <input id="currentAccountName" name="currentUsername" type="text" readonly />
+            </label>
+            <label class="field">
+              <span>新账号</span>
               <input
-                id="oldPassword"
-                name="oldPassword"
-                type="password"
-                autocomplete="current-password"
+                id="accountNewUsername"
+                name="newUsername"
+                type="text"
+                autocapitalize="none"
+                spellcheck="false"
+                minlength="3"
+                maxlength="32"
+                placeholder="3-32 位字母、数字、中文或 ._-"
                 required
               />
             </label>
             <label class="field">
               <span>新密码</span>
               <input
-                id="newPassword"
+                id="accountNewPassword"
                 name="newPassword"
                 type="password"
                 autocomplete="new-password"
+                placeholder="留空则保持原密码"
+              />
+            </label>
+            <label class="field">
+              <span>确认新密码</span>
+              <input
+                id="accountConfirmPassword"
+                name="confirmPassword"
+                type="password"
+                autocomplete="new-password"
+                placeholder="再次输入新密码"
+              />
+            </label>
+            <label class="field span-2">
+              <span>当前密码</span>
+              <input
+                id="accountCurrentPassword"
+                name="currentPassword"
+                type="password"
+                autocomplete="current-password"
+                placeholder="保存修改前需要验证"
                 required
-                minlength="1"
               />
             </label>
             <div class="actions span-2">
-              <button type="submit" class="button primary" id="changePasswordBtn">保存新密码</button>
-              <button type="button" class="button" id="cancelChangePasswordBtn">取消</button>
+              <button type="submit" class="button primary" id="saveAccountSettingsBtn">保存账号与密码</button>
             </div>
-            <div class="notice is-hidden span-2" id="changePasswordNotice" role="status" aria-live="polite"></div>
+            <div class="notice is-hidden span-2" id="accountSettingsNotice" role="status" aria-live="polite"></div>
           </form>
         </section>
       </main>

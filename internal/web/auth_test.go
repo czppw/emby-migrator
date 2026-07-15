@@ -42,6 +42,99 @@ func TestDefaultSinglePasswordLoginReturnsAdminPrincipal(t *testing.T) {
 	}
 }
 
+func TestDefaultSingleUserLoginRejectsDifferentUsername(t *testing.T) {
+	app, client := newAuthTestServer(t, t.TempDir(), "pw")
+	defer app.Close()
+
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "someone-else",
+		"password": "pw",
+	}, http.StatusUnauthorized)
+
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "admin",
+		"password": "pw",
+	}, http.StatusOK)
+}
+
+func TestSingleUserCanChangeAccountAndInvalidateOldSessions(t *testing.T) {
+	configDir := t.TempDir()
+	app, client := newAuthTestServer(t, configDir, "pw")
+	defer app.Close()
+
+	otherJar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherClient := &http.Client{Transport: app.Client().Transport, Jar: otherJar}
+	for _, loginClient := range []*http.Client{client, otherClient} {
+		postJSONRaw(t, loginClient, app.URL+"/api/auth/login", map[string]string{
+			"username": "admin",
+			"password": "pw",
+		}, http.StatusOK)
+	}
+
+	body := postJSONRaw(t, client, app.URL+"/api/auth/account", map[string]string{
+		"currentPassword": "pw",
+		"newUsername":     "迁移管理员_01",
+		"newPassword":     "next-pw",
+	}, http.StatusOK)
+	assertNoSecretInBody(t, body, "pw")
+	var changed usernameChangeResponse
+	if err := json.Unmarshal(body, &changed); err != nil {
+		t.Fatal(err)
+	}
+	if !changed.OK || changed.Username != "迁移管理员_01" {
+		t.Fatalf("unexpected username change response: %#v", changed)
+	}
+
+	for _, oldSession := range []*http.Client{client, otherClient} {
+		var status authStatusResponse
+		if err := json.Unmarshal(getRaw(t, oldSession, app.URL+"/api/auth/status", http.StatusOK), &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.Authenticated {
+			t.Fatalf("old session remained authenticated: %#v", status)
+		}
+	}
+
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "admin",
+		"password": "pw",
+	}, http.StatusUnauthorized)
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "迁移管理员_01",
+		"password": "pw",
+	}, http.StatusUnauthorized)
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "迁移管理员_01",
+		"password": "next-pw",
+	}, http.StatusOK)
+
+	var disk usersConfig
+	if err := readJSONFile(filepath.Join(configDir, usersFileName), &disk); err != nil {
+		t.Fatal(err)
+	}
+	if len(disk.Users) != 1 || disk.Users[0].Username != "迁移管理员_01" || !disk.Users[0].verifyPassword("next-pw") {
+		t.Fatalf("unexpected persisted account: %#v", disk.Users)
+	}
+}
+
+func TestUsernameChangeValidatesPasswordAndFormat(t *testing.T) {
+	app, client := newAuthTestServer(t, t.TempDir(), "pw")
+	defer app.Close()
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{"password": "pw"}, http.StatusOK)
+
+	postJSONRaw(t, client, app.URL+"/api/auth/account", map[string]string{
+		"currentPassword": "wrong",
+		"newUsername":     "new-admin",
+	}, http.StatusUnauthorized)
+	postJSONRaw(t, client, app.URL+"/api/auth/account", map[string]string{
+		"currentPassword": "pw",
+		"newUsername":     "x",
+	}, http.StatusBadRequest)
+}
+
 func TestUsersJSONLoginMigratesPlaintextPassword(t *testing.T) {
 	configDir := t.TempDir()
 	writeUsersFile(t, configDir, usersConfig{

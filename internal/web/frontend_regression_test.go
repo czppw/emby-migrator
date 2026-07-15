@@ -13,8 +13,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 	app := readFrontendFile(t, "assets", "app.js")
 
 	for _, marker := range []string{
-		`./assets/styles.css?v=1.1.1`,
-		`./assets/app.js?v=1.1.1`,
+		`./assets/styles.css?v=1.1.2`,
+		`./assets/app.js?v=1.1.2`,
 		"https://github.com/czppw/emby-migrator",
 		"https://hub.docker.com/r/czppwa/emby-migrator",
 		"License: AGPL-3.0-or-later",
@@ -35,6 +35,16 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		"从旧设备迁移导出包",
 		"/opt/emby-migrator/data/imports/",
 		`id="versionUpdate"`,
+		`id="authUsername"`,
+		`name="username"`,
+		`autocomplete="username"`,
+		`name="password"`,
+		`placeholder="默认 admin"`,
+		`id="accountSettingsForm"`,
+		`id="currentAccountName"`,
+		`id="accountConfirmPassword"`,
+		"媒体技术信息",
+		"Media Info",
 	} {
 		if !strings.Contains(index, marker) {
 			t.Fatalf("index.html missing regression marker %q", marker)
@@ -45,6 +55,9 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		if strings.Contains(index, forbidden) || strings.Contains(app, forbidden) {
 			t.Fatalf("server address book UI still contains forbidden marker %q", forbidden)
 		}
+	}
+	if strings.Contains(index, `value="admin"`) {
+		t.Fatal("login username must not hard-code admin as the input value")
 	}
 	for _, forbidden := range []string{"ensureMediaInfoOptions", "ensureMediaInfoOption("} {
 		if strings.Contains(app, forbidden) {
@@ -64,6 +77,8 @@ func TestFrontendUITelegramRegressionMarkers(t *testing.T) {
 		"autoManageContainer: Boolean(els.autoManageContainer?.checked)",
 		"handleRefreshExports();",
 		`fetchJson("/api/version")`,
+		`postJson("/api/auth/account"`,
+		`const USERNAME_STORAGE_KEY = "embyMigrator.loginUsername";`,
 	} {
 		if !strings.Contains(app, marker) {
 			t.Fatalf("app.js missing image-type default marker %q", marker)

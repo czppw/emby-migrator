@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-czppw%2Femby--migrator-111827?style=for-the-badge&logo=github)](https://github.com/czppw/emby-migrator)
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-czppwa%2Femby--migrator-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/czppwa/emby-migrator)
-![Version](https://img.shields.io/badge/version-v1.1.1-315CF6?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-v1.1.2-315CF6?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-22C55E?style=for-the-badge)
 
 # Emby Migrator
@@ -96,7 +96,7 @@ docker run -d \
 如果想固定正式版：
 
 ```bash
-czppwa/emby-migrator:v1.1.1
+czppwa/emby-migrator:v1.1.2
 ```
 
 ### 3. 打开网页
@@ -105,13 +105,14 @@ czppwa/emby-migrator:v1.1.1
 http://服务器IP:8787
 ```
 
-默认登录密码：
+默认登录账号与密码：
 
 ```text
+admin
 password
 ```
 
-登录后建议第一时间修改密码。
+登录后建议第一时间修改密码。登录页使用标准账号和密码字段，浏览器可以保存登录信息；安全设置使用一个表单统一修改账号和密码，保存后会立即退出并要求使用新凭据重新登录。
 
 ---
 
@@ -145,6 +146,7 @@ services:
 | 项目 | 路径 / 默认值 |
 | --- | --- |
 | Web 端口 | `8787` |
+| 默认账号 | `admin` |
 | 默认密码 | `password` |
 | 容器数据目录 | `/data` |
 | 容器配置目录 | `/config` |
@@ -248,7 +250,8 @@ http://192.168.1.10:8096
 
 ## 安全说明
 
-- 默认密码是 `password`，公开部署后请立即修改。
+- 默认账号是 `admin`，默认密码是 `password`；公开部署后请立即修改密码。
+- 安全设置支持修改单用户账号；修改时必须验证当前密码，成功后旧账号和已有登录会话立即失效。
 - API Key 只通过页面请求发送给后端，不写入代码或镜像。
 - 后端保存服务器 API Key，前端读取配置时只返回掩码，不回传明文 Key。
 - 日志会尽量避免打印完整 API Key。

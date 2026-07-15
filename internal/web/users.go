@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -75,6 +77,9 @@ func (s *Server) authenticateLogin(username, password string) (authPrincipal, bo
 	if len(users.Users) > 0 {
 		return s.authenticateConfiguredUser(users, username, password)
 	}
+	if !sameLoginName(username, "admin") {
+		return authPrincipal{}, false, nil
+	}
 	if !constantTimeStringEqual(password, s.cfg.AdminPassword) {
 		return authPrincipal{}, false, nil
 	}
@@ -103,57 +108,121 @@ func (s *Server) changeCurrentPassword(username, oldPassword, newPassword string
 	if strings.TrimSpace(newPassword) == "" {
 		return fmt.Errorf("newPassword is required")
 	}
+	_, err := s.changeCurrentAccount(username, oldPassword, username, newPassword)
+	return err
+}
+
+func (s *Server) changeCurrentUsername(username, currentPassword, newUsername string) (string, error) {
+	return s.changeCurrentAccount(username, currentPassword, newUsername, "")
+}
+
+func (s *Server) changeCurrentAccount(username, currentPassword, newUsername, newPassword string) (string, error) {
+	newUsername = strings.TrimSpace(newUsername)
+	if err := validateUsername(newUsername); err != nil {
+		return "", err
+	}
+	usernameChanged := !sameLoginName(username, newUsername)
+	passwordChanged := newPassword != ""
+	if !usernameChanged && !passwordChanged {
+		return "", fmt.Errorf("no account changes requested")
+	}
 	cfg, err := s.loadUsersConfig()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(cfg.Users) == 0 {
-		if !sameLoginName(username, "admin") || !constantTimeStringEqual(oldPassword, s.cfg.AdminPassword) {
-			return fmt.Errorf("invalid current password")
+		if !sameLoginName(username, "admin") || !constantTimeStringEqual(currentPassword, s.cfg.AdminPassword) {
+			return "", fmt.Errorf("invalid current password")
 		}
-		hash, err := newPasswordHash(newPassword)
+		passwordToStore := currentPassword
+		if passwordChanged {
+			passwordToStore = newPassword
+		}
+		hash, err := newPasswordHash(passwordToStore)
 		if err != nil {
-			return err
+			return "", err
 		}
 		cfg = usersConfig{
 			SchemaVersion: 1,
 			Users: []configUser{{
-				Username:     "admin",
+				Username:     newUsername,
 				PasswordHash: hash,
 				Role:         string(roleAdmin),
 			}},
 		}
 		if err := writeUsersConfig(s.usersPath(), cfg); err != nil {
-			return err
+			return "", err
 		}
 		s.clearUsersCache()
-		return nil
+		return newUsername, nil
 	}
-	found := false
+
+	currentIndex := -1
 	for i := range cfg.Users {
-		if !sameLoginName(username, cfg.Users[i].Username) {
+		if sameLoginName(username, cfg.Users[i].Username) {
+			currentIndex = i
 			continue
 		}
-		found = true
-		if !cfg.Users[i].verifyPassword(oldPassword) {
-			return fmt.Errorf("invalid current password")
+		if sameLoginName(newUsername, cfg.Users[i].Username) {
+			return "", fmt.Errorf("username is already in use")
 		}
+	}
+	if currentIndex < 0 {
+		return "", fmt.Errorf("current user not found")
+	}
+	if !cfg.Users[currentIndex].verifyPassword(currentPassword) {
+		return "", fmt.Errorf("invalid current password")
+	}
+	cfg.Users[currentIndex].Username = newUsername
+	if passwordChanged {
 		hash, err := newPasswordHash(newPassword)
 		if err != nil {
-			return err
+			return "", err
 		}
-		cfg.Users[i].Password = ""
-		cfg.Users[i].PasswordHash = hash
-		break
-	}
-	if !found {
-		return fmt.Errorf("current user not found")
+		cfg.Users[currentIndex].Password = ""
+		cfg.Users[currentIndex].PasswordHash = hash
 	}
 	if err := writeUsersConfig(s.usersPath(), cfg); err != nil {
-		return err
+		return "", err
 	}
 	s.clearUsersCache()
+	return newUsername, nil
+}
+
+func validateUsername(username string) error {
+	username = strings.TrimSpace(username)
+	length := utf8.RuneCountInString(username)
+	if length < 3 || length > 32 {
+		return fmt.Errorf("username must contain 3 to 32 characters")
+	}
+	for index, char := range []rune(username) {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) {
+			continue
+		}
+		if index > 0 && (char == '.' || char == '-' || char == '_') {
+			continue
+		}
+		return fmt.Errorf("username contains unsupported characters")
+	}
 	return nil
+}
+
+func (s *Server) principalActive(principal authPrincipal) bool {
+	cfg, err := s.loadUsersConfig()
+	if err != nil {
+		return false
+	}
+	if len(cfg.Users) == 0 {
+		return sameLoginName(principal.Username, "admin") && principal.Role == string(roleAdmin)
+	}
+	for _, user := range cfg.Users {
+		if !sameLoginName(principal.Username, user.Username) {
+			continue
+		}
+		role, ok := normalizeRole(user.Role)
+		return ok && principal.Role == string(role)
+	}
+	return false
 }
 
 func sameLoginName(requested, configured string) bool {
