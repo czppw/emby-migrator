@@ -121,7 +121,7 @@ func TestResolveExportPathRejectsTraversal(t *testing.T) {
 	if name != "pkg" || resolved != exportDir {
 		t.Fatalf("ResolveExportPath = (%q, %q), want (%q, pkg)", resolved, name, exportDir)
 	}
-	for _, input := range []string{"..", "../pkg", "..\\pkg", filepath.Join(dataDir, "outside")} {
+	for _, input := range []string{"..", "../pkg", "..\\pkg", "folder\\..\\pkg", filepath.Join(dataDir, "outside")} {
 		if _, _, err := service.ResolveExportPath(input); err == nil || !strings.Contains(err.Error(), "allowed package directories") {
 			t.Fatalf("ResolveExportPath(%q) error = %v, want allowed package directories rejection", input, err)
 		}

@@ -806,7 +806,13 @@ func manifestItemsByStableKey(manifest storage.Manifest) map[string]storage.Item
 }
 
 func (s *Service) ResolveExportPath(exportPath string) (string, string, error) {
-	cleaned := filepath.Clean(strings.TrimSpace(exportPath))
+	raw := strings.TrimSpace(exportPath)
+	for _, segment := range strings.Split(strings.ReplaceAll(raw, `\`, "/"), "/") {
+		if segment == ".." {
+			return "", "", fmt.Errorf("exportPath must stay under allowed package directories")
+		}
+	}
+	cleaned := filepath.Clean(raw)
 	if cleaned == "." || cleaned == "" {
 		return "", "", fmt.Errorf("exportPath is required")
 	}
