@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-czppw%2Femby--migrator-111827?style=for-the-badge&logo=github)](https://github.com/czppw/emby-migrator)
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-czppwa%2Femby--migrator-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://hub.docker.com/r/czppwa/emby-migrator)
-![Version](https://img.shields.io/badge/version-v1.1.3-315CF6?style=for-the-badge)
+[![Version](https://img.shields.io/github/v/release/czppw/emby-migrator?style=for-the-badge&color=315CF6)](https://github.com/czppw/emby-migrator/releases/latest)
 ![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-22C55E?style=for-the-badge)
 
 # Emby Migrator
@@ -96,7 +96,7 @@ docker run -d \
 如果想固定正式版：
 
 ```bash
-czppwa/emby-migrator:v1.1.3
+czppwa/emby-migrator:vX.Y.Z
 ```
 
 ### 3. 打开网页
@@ -219,12 +219,14 @@ http://127.0.0.1:7890
 
 ```bash
 -e EMBY_MIGRATOR_MAX_MEMORY_LOGS=2000 \
+-e EMBY_MIGRATOR_MAX_CONCURRENCY=64 \
 -e EMBY_MIGRATOR_MAX_COMPLETED_JOBS=20 \
 -e EMBY_MIGRATOR_JOB_RETENTION_HOURS=24 \
 -e EMBY_MIGRATOR_RELEASE_MEMORY_ON_FINISH=true
 ```
 
 大媒体库长期运行时，可以把 `EMBY_MIGRATOR_MAX_MEMORY_LOGS` 调低到 `500` 或 `1000`。
+`EMBY_MIGRATOR_MAX_CONCURRENCY` 用于限制单个任务实际创建的 worker 数；设为 `0` 可关闭保护，本地高性能环境也可以按资源情况调高。
 
 ---
 

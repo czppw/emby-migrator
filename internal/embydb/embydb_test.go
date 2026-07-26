@@ -3,8 +3,11 @@ package embydb
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +138,95 @@ func TestApplyAcceptsPortableTargetName(t *testing.T) {
 	}
 	if result.ItemsApplied != 1 {
 		t.Fatalf("portable target name apply result = %#v", result)
+	}
+}
+
+func TestApplyPrunesOldMigratorBackups(t *testing.T) {
+	path := createFixtureDatabase(t)
+	oldBackups := make([]string, 0, 6)
+	for day := 1; day <= 6; day++ {
+		backup := path + ".emby-migrator-2026070" + strconv.Itoa(day) + "-120000.000000000.bak"
+		if err := os.WriteFile(backup, []byte("old backup"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		oldBackups = append(oldBackups, backup)
+	}
+	unrelated := []string{
+		path + ".manual.bak",
+		filepath.Join(filepath.Dir(path), "other.db.emby-migrator-20260701-120000.000000000.bak"),
+		path + ".emby-migrator-not-a-time.bak",
+	}
+	for _, candidate := range unrelated {
+		if err := os.WriteFile(candidate, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Apply(context.Background(), ApplyOptions{
+		DatabasePath:  path,
+		SourceVersion: "4.9.5.0",
+		TargetVersion: "4.9.5.0",
+		Items:         []ItemPatch{fixturePatch()},
+		Now:           func() time.Time { return time.Date(2026, 7, 7, 12, 0, 0, 0, time.Local) },
+	})
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if result.BackupsPruned != 2 || result.BackupCleanupWarning != "" {
+		t.Fatalf("unexpected cleanup result: %#v", result)
+	}
+	for _, removed := range oldBackups[:2] {
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Fatalf("old backup should be removed: %s, err=%v", removed, err)
+		}
+	}
+	for _, retained := range append(oldBackups[2:], result.BackupPath) {
+		if _, err := os.Stat(retained); err != nil {
+			t.Fatalf("retained backup is missing: %s: %v", retained, err)
+		}
+	}
+	for _, retained := range unrelated {
+		if _, err := os.Stat(retained); err != nil {
+			t.Fatalf("unrelated backup was removed: %s: %v", retained, err)
+		}
+	}
+}
+
+func TestCleanupDatabaseBackupsContinuesAfterRemoveFailure(t *testing.T) {
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "library.db")
+	current := databasePath + ".emby-migrator-20260707-120000.000000000.bak"
+	var candidates []string
+	for day := 1; day <= 7; day++ {
+		candidate := databasePath + ".emby-migrator-2026070" + strconv.Itoa(day) + "-120000.000000000.bak"
+		if err := os.WriteFile(candidate, []byte("backup"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	failingPath := candidates[0]
+	var attempted []string
+	pruned, err := cleanupDatabaseBackups(databasePath, current, 5, func(path string) error {
+		attempted = append(attempted, path)
+		if path == failingPath {
+			return errors.New("permission denied")
+		}
+		return os.Remove(path)
+	})
+	if pruned != 1 {
+		t.Fatalf("pruned=%d, want 1", pruned)
+	}
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("cleanup warning=%v, want removal failure", err)
+	}
+	sort.Strings(attempted)
+	wantAttempted := []string{candidates[0], candidates[1]}
+	sort.Strings(wantAttempted)
+	if strings.Join(attempted, "\n") != strings.Join(wantAttempted, "\n") {
+		t.Fatalf("attempted removals=%v, want %v", attempted, wantAttempted)
+	}
+	if _, err := os.Stat(current); err != nil {
+		t.Fatalf("current backup must be retained: %v", err)
 	}
 }
 

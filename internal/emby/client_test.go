@@ -614,6 +614,59 @@ func TestPersonLookupAndAvatarDownloadUseNameLookupThenTargetPersonIDForUpload(t
 	}
 }
 
+func TestPersonPathsEscapeNamesAsSinglePathSegments(t *testing.T) {
+	tests := []struct {
+		name        string
+		personName  string
+		escapedName string
+	}{
+		{name: "slash", personName: "AC/DC", escapedName: "AC%2FDC"},
+		{name: "question mark", personName: "Who? Me", escapedName: "Who%3F%20Me"},
+		{name: "fragment", personName: "Name#1", escapedName: "Name%231"},
+		{name: "space", personName: "Keanu Reeves", escapedName: "Keanu%20Reeves"},
+		{name: "non ASCII", personName: "周星驰", escapedName: "%E5%91%A8%E6%98%9F%E9%A9%B0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			personPath := "/emby/Persons/" + tt.escapedName
+			imagePath := personPath + "/Images/Primary"
+			var requested []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requested = append(requested, r.URL.EscapedPath())
+				switch r.URL.EscapedPath() {
+				case personPath:
+					writeJSON(t, w, map[string]interface{}{"Name": tt.personName, "Id": "person-id"})
+				case imagePath:
+					w.Header().Set("Content-Type", "image/jpeg")
+					_, _ = w.Write([]byte("avatar"))
+				default:
+					http.Error(w, "unexpected path "+r.URL.EscapedPath(), http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL+"/emby", testAPIKey)
+			if err != nil {
+				t.Fatalf("NewClient returned error: %v", err)
+			}
+			client.HTTPClient = server.Client()
+
+			if _, err := client.Person(context.Background(), tt.personName); err != nil {
+				t.Fatalf("Person returned error: %v", err)
+			}
+			if _, _, err := client.DownloadPersonImage(context.Background(), tt.personName); err != nil {
+				t.Fatalf("DownloadPersonImage returned error: %v", err)
+			}
+
+			want := []string{personPath, imagePath}
+			if !reflect.DeepEqual(requested, want) {
+				t.Fatalf("person name was not preserved as one escaped path segment: got %#v, want %#v", requested, want)
+			}
+		})
+	}
+}
+
 func TestUploadPersonImageUsesPersonsSearchToAvoidBrokenNameLookup(t *testing.T) {
 	var sawSearch bool
 	var uploaded bool

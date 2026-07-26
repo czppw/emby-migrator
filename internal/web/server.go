@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,10 @@ type Server struct {
 	exporter              *exporter.Service
 	sessionSecret         []byte
 	usersCache            cachedUsersConfig
+	usersWriteMu          sync.Mutex
+	loginRateMu           sync.Mutex
+	loginAttempts         map[string]loginAttemptState
+	loginLastCleanup      time.Time
 	telegramNotifications sync.Map
 	docker                dockerController
 	versionCheck          versionCheckCache
@@ -94,6 +99,7 @@ func NewServer(cfg config.Config, jobs *job.Manager, exporter *exporter.Service)
 		jobs:          jobs,
 		exporter:      exporter,
 		sessionSecret: makeSessionSecret(cfg.SessionSecret),
+		loginAttempts: make(map[string]loginAttemptState),
 		docker:        newDockerController(cfg.DockerHost),
 	}
 }
@@ -137,7 +143,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /api/jobs/{id}/logs", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobLogs)))
 	mux.Handle("GET /api/jobs/{id}/logs.txt", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobLogDownload)))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
-	return recoverJSON(mux)
+	return securityHeaders(recoverJSON(mux))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +245,7 @@ func (s *Server) handleExportJob(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.Concurrency = boundedConcurrency(req.Concurrency, s.cfg.MaxConcurrency)
 	connection, err := s.resolveEmbyConnection(req.BaseURL, req.APIKey, coalesceProfileID(req.ProfileID, req.SourceProfileID))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -372,6 +379,7 @@ func (s *Server) startImportJob(w http.ResponseWriter, r *http.Request, forceDry
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.Concurrency = boundedConcurrency(req.Concurrency, s.cfg.MaxConcurrency)
 	if strings.TrimSpace(req.ExportPath) == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("exportPath is required"))
 		return
@@ -569,11 +577,20 @@ func beijingTime(value time.Time) time.Time {
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
-	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(out); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return false
 	}
 	return true
+}
+
+func boundedConcurrency(value, maximum int) int {
+	if maximum > 0 && value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -583,14 +600,19 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]any{"error": err.Error()})
+	message := err.Error()
+	if status >= http.StatusInternalServerError && status < http.StatusBadGateway {
+		log.Printf("HTTP %d: %v", status, err)
+		message = "internal server error"
+	}
+	writeJSON(w, status, map[string]any{"error": message})
 }
 
 func recoverJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				writeError(w, http.StatusInternalServerError, fmt.Errorf("%v", recovered))
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("panic: %v", recovered))
 			}
 		}()
 		next.ServeHTTP(w, r)

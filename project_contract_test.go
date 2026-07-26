@@ -124,14 +124,19 @@ func TestDockerWorkflowSkipsDocsOnlyChanges(t *testing.T) {
 		"paths-ignore:",
 		`"docs/**"`,
 		`"*.md"`,
-		`"*_test.go"`,
-		`"**/*_test.go"`,
 		"workflow_dispatch:",
+		"uses: ./.github/workflows/ci.yml",
+		"needs: ci",
 		"type=raw,value=latest",
 		"type=sha,prefix=sha-",
 	} {
 		if !strings.Contains(workflow, marker) {
 			t.Fatalf("docker workflow missing marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{`"*_test.go"`, `"**/*_test.go"`} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("docker workflow must not ignore test changes: %s", forbidden)
 		}
 	}
 }

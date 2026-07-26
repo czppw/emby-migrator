@@ -712,7 +712,7 @@ func (c *Client) Item(ctx context.Context, id string) (Item, error) {
 
 func (c *Client) Person(ctx context.Context, name string) (Person, error) {
 	var person Person
-	err := c.JSON(ctx, http.MethodGet, "/Persons/"+name, url.Values{
+	err := c.JSON(ctx, http.MethodGet, "/Persons/"+url.PathEscape(name), url.Values{
 		"Fields": {"ProviderIds,ImageTags"},
 	}, nil, &person)
 	return person, err
@@ -840,7 +840,7 @@ func (c *Client) DownloadPath(ctx context.Context, endpoint string) ([]byte, str
 }
 
 func (c *Client) DownloadPersonImage(ctx context.Context, name string) ([]byte, string, error) {
-	return c.DownloadPath(ctx, "/Persons/"+name+"/Images/Primary")
+	return c.DownloadPath(ctx, "/Persons/"+url.PathEscape(name)+"/Images/Primary")
 }
 
 func (c *Client) UpdateItem(ctx context.Context, id string, item Item) error {
@@ -941,7 +941,13 @@ func (c *Client) newRequest(ctx context.Context, method, endpoint string, params
 	if err != nil {
 		return nil, err
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(path.Clean("/"+endpoint), "/")
+	escapedPath := strings.TrimRight(u.EscapedPath(), "/") + "/" + strings.TrimLeft(path.Clean("/"+endpoint), "/")
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return nil, fmt.Errorf("decode request path: %w", err)
+	}
+	u.Path = decodedPath
+	u.RawPath = escapedPath
 	if params != nil {
 		u.RawQuery = params.Encode()
 	}

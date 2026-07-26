@@ -10,19 +10,34 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const sessionCookieName = "emby_migrator_session"
+const (
+	sessionCookieName     = "emby_migrator_session"
+	loginMaxFailures      = 5
+	loginRateLimitWindow  = 5 * time.Minute
+	loginRateCleanupEvery = time.Minute
+)
+
+var readSecureRandom = rand.Read
 
 type authContextKey struct{}
 
 type authPrincipal struct {
-	Username string `json:"user"`
-	Role     string `json:"role"`
+	Username       string `json:"user"`
+	Role           string `json:"role"`
+	SessionVersion int    `json:"-"`
+}
+
+type loginAttemptState struct {
+	Failures     int
+	FirstFailure time.Time
+	BlockedUntil time.Time
 }
 
 type authStatusResponse struct {
@@ -65,14 +80,15 @@ type accountChangeRequest struct {
 }
 
 type sessionPayload struct {
-	Expires  int64  `json:"exp"`
-	Nonce    string `json:"nonce"`
-	Username string `json:"user"`
-	Role     string `json:"role"`
+	Expires        int64  `json:"exp"`
+	Nonce          string `json:"nonce"`
+	Username       string `json:"user"`
+	Role           string `json:"role"`
+	SessionVersion int    `json:"sv,omitempty"`
 }
 
 func defaultPrincipal() authPrincipal {
-	return authPrincipal{Username: "admin", Role: string(roleAdmin)}
+	return authPrincipal{Username: "admin", Role: string(roleAdmin), SessionVersion: 1}
 }
 
 func (s *Server) authEnabled() bool {
@@ -84,8 +100,8 @@ func makeSessionSecret(value string) []byte {
 		return []byte(value)
 	}
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return []byte(time.Now().Format(time.RFC3339Nano))
+	if _, err := readSecureRandom(buf); err != nil {
+		panic(fmt.Sprintf("generate session secret: %v", err))
 	}
 	return buf
 }
@@ -132,16 +148,31 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	rateKey := loginRateLimitKey(r, req.Username)
+	if retryAfter, blocked := s.loginBlocked(rateKey, time.Now()); blocked {
+		writeLoginRateLimitError(w, retryAfter)
+		return
+	}
 	principal, ok, err := s.authenticateLogin(req.Username, req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if !ok {
+		if retryAfter, blocked := s.recordLoginFailure(rateKey, time.Now()); blocked {
+			writeLoginRateLimitError(w, retryAfter)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, fmt.Errorf("invalid username or password"))
 		return
 	}
-	http.SetCookie(w, s.sessionCookie(r, s.newSessionToken(principal)))
+	s.clearLoginFailures(rateKey)
+	token, err := s.newSessionToken(principal)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	http.SetCookie(w, s.sessionCookie(r, token))
 	writeJSON(w, http.StatusOK, authStatusResponse{
 		Enabled:       true,
 		Authenticated: true,
@@ -164,7 +195,7 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   requestIsHTTPS(r),
 	})
 }
 
@@ -190,6 +221,7 @@ func (s *Server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request
 		writeError(w, status, err)
 		return
 	}
+	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, passwordChangeResponse{OK: true})
 }
 
@@ -269,26 +301,33 @@ func currentPrincipal(r *http.Request) (authPrincipal, bool) {
 	return principal, ok
 }
 
-func (s *Server) newSessionToken(principal authPrincipal) string {
+func (s *Server) newSessionToken(principal authPrincipal) (string, error) {
 	if strings.TrimSpace(principal.Username) == "" || strings.TrimSpace(principal.Role) == "" {
 		principal = defaultPrincipal()
 	}
+	if principal.SessionVersion <= 0 {
+		principal.SessionVersion = 1
+	}
 	expires := time.Now().Add(12 * time.Hour).Unix()
 	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		copy(nonce, []byte(time.Now().Format(time.RFC3339Nano)))
+	if _, err := readSecureRandom(nonce); err != nil {
+		return "", fmt.Errorf("generate session nonce: %w", err)
 	}
 	payload := sessionPayload{
-		Expires:  expires,
-		Nonce:    hex.EncodeToString(nonce),
-		Username: principal.Username,
-		Role:     principal.Role,
+		Expires:        expires,
+		Nonce:          hex.EncodeToString(nonce),
+		Username:       principal.Username,
+		Role:           principal.Role,
+		SessionVersion: principal.SessionVersion,
 	}
-	payloadBytes, _ := json.Marshal(payload)
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode session: %w", err)
+	}
 	mac := hmac.New(sha256.New, s.sessionSecret)
 	mac.Write(payloadBytes)
 	signature := mac.Sum(nil)
-	return base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + base64.RawURLEncoding.EncodeToString(signature)
+	return base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
 func (s *Server) validSession(r *http.Request) bool {
@@ -339,7 +378,10 @@ func sessionPayloadPrincipal(payloadBytes []byte) (authPrincipal, bool) {
 	if !ok || strings.TrimSpace(payload.Username) == "" {
 		return authPrincipal{}, false
 	}
-	return authPrincipal{Username: strings.TrimSpace(payload.Username), Role: string(role)}, true
+	if payload.SessionVersion <= 0 {
+		payload.SessionVersion = 1
+	}
+	return authPrincipal{Username: strings.TrimSpace(payload.Username), Role: string(role), SessionVersion: payload.SessionVersion}, true
 }
 
 func (s *Server) legacySessionPrincipal(payloadBytes []byte) (authPrincipal, bool) {
@@ -366,8 +408,90 @@ func (s *Server) sessionCookie(r *http.Request, token string) *http.Cookie {
 		MaxAge:   int((12 * time.Hour).Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   requestIsHTTPS(r),
 	}
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	forwardedProto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(forwardedProto, "https")
+}
+
+func loginRateLimitKey(r *http.Request, username string) string {
+	ip := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	username = strings.ToLower(strings.TrimSpace(username))
+	if username == "" {
+		username = "admin"
+	}
+	usernameHash := sha256.Sum256([]byte(username))
+	return ip + ":" + hex.EncodeToString(usernameHash[:])
+}
+
+func (s *Server) loginBlocked(key string, now time.Time) (time.Duration, bool) {
+	s.loginRateMu.Lock()
+	defer s.loginRateMu.Unlock()
+	s.cleanupLoginAttemptsLocked(now)
+	attempt := s.loginAttempts[key]
+	if attempt.BlockedUntil.After(now) {
+		return attempt.BlockedUntil.Sub(now), true
+	}
+	if !attempt.BlockedUntil.IsZero() {
+		delete(s.loginAttempts, key)
+	}
+	return 0, false
+}
+
+func (s *Server) recordLoginFailure(key string, now time.Time) (time.Duration, bool) {
+	s.loginRateMu.Lock()
+	defer s.loginRateMu.Unlock()
+	s.cleanupLoginAttemptsLocked(now)
+	attempt := s.loginAttempts[key]
+	if attempt.FirstFailure.IsZero() || now.Sub(attempt.FirstFailure) >= loginRateLimitWindow {
+		attempt = loginAttemptState{FirstFailure: now}
+	}
+	attempt.Failures++
+	if attempt.Failures >= loginMaxFailures {
+		attempt.BlockedUntil = now.Add(loginRateLimitWindow)
+	}
+	s.loginAttempts[key] = attempt
+	if attempt.BlockedUntil.After(now) {
+		return attempt.BlockedUntil.Sub(now), true
+	}
+	return 0, false
+}
+
+func (s *Server) clearLoginFailures(key string) {
+	s.loginRateMu.Lock()
+	delete(s.loginAttempts, key)
+	s.loginRateMu.Unlock()
+}
+
+func (s *Server) cleanupLoginAttemptsLocked(now time.Time) {
+	if !s.loginLastCleanup.IsZero() && now.Sub(s.loginLastCleanup) < loginRateCleanupEvery {
+		return
+	}
+	for key, attempt := range s.loginAttempts {
+		if (!attempt.BlockedUntil.IsZero() && !attempt.BlockedUntil.After(now)) ||
+			(attempt.BlockedUntil.IsZero() && now.Sub(attempt.FirstFailure) >= loginRateLimitWindow) {
+			delete(s.loginAttempts, key)
+		}
+	}
+	s.loginLastCleanup = now
+}
+
+func writeLoginRateLimitError(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, fmt.Errorf("too many login attempts; try again later"))
 }
 
 func hashForCompare(value []byte) string {

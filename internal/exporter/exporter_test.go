@@ -3,6 +3,8 @@ package exporter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -301,6 +303,7 @@ func TestResumeSuccessfulItemsMergesCheckpointAndReportsForSameTarget(t *testing
 	}
 	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
 	checkpoint := newImportCheckpointStore(exportDir, target)
+	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.Record(ImportMatch{StableKey: "checkpoint", SourceName: "Checkpoint", TargetID: "item-1", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +342,7 @@ func TestResumeSuccessfulItemsDoesNotResumeImageFailedItems(t *testing.T) {
 	}
 	target := ImportTarget{ServerID: "target-a"}
 	checkpoint := newImportCheckpointStore(exportDir, target)
+	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.Record(ImportMatch{
 		StableKey:     "image-failed-checkpoint",
 		SourceName:    "Image Failed Checkpoint",
@@ -387,6 +391,7 @@ func TestResumeSuccessfulItemsRequiresCompletedMediaInfoWhenEnabled(t *testing.T
 	}
 	target := ImportTarget{ServerID: "target-a"}
 	checkpoint := newImportCheckpointStore(exportDir, target)
+	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.Record(ImportMatch{StableKey: "media-updated-checkpoint", Status: "updated", MediaInfoUpdated: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -426,8 +431,12 @@ func TestImportCheckpointRecordClearsItemsWhenTargetSwitches(t *testing.T) {
 	if err := first.RecordPersonAvatar(personImageResult{StableKey: "old-person", Name: "Old Person", TargetID: "old-person-target"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	second := newImportCheckpointStore(exportDir, secondTarget)
+	t.Cleanup(func() { _ = second.Close() })
 	if err := second.Record(ImportMatch{StableKey: "new-item", SourceName: "New", TargetID: "new-target", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
@@ -441,6 +450,135 @@ func TestImportCheckpointRecordClearsItemsWhenTargetSwitches(t *testing.T) {
 	}
 	if checkpoint.Items["new-item"].StableKey == "" {
 		t.Fatalf("new target item missing after target switch: %#v", checkpoint)
+	}
+}
+
+func TestImportCheckpointAppendsJournalAndCompactsLegacyJSONOnClose(t *testing.T) {
+	exportDir := t.TempDir()
+	path := filepath.Join(exportDir, "import-checkpoint.json")
+	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
+	legacy := importCheckpoint{
+		SchemaVersion: 1,
+		Target:        target,
+		UpdatedAt:     time.Now().Add(-time.Hour),
+		Items: map[string]ImportCheckpoint{
+			"legacy": {StableKey: "legacy", Status: "updated"},
+		},
+	}
+	if err := storage.WriteJSON(path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := newImportCheckpointStore(exportDir, target)
+	const itemCount = 128
+	for i := 0; i < itemCount; i++ {
+		if err := store.Record(ImportMatch{
+			StableKey:  fmt.Sprintf("item-%03d", i),
+			SourceName: fmt.Sprintf("Item %d", i),
+			TargetID:   fmt.Sprintf("target-%d", i),
+			Status:     "updated",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.RecordPersonAvatar(personImageResult{StableKey: "person-one", Name: "Person One", TargetID: "person-target"}); err != nil {
+		t.Fatal(err)
+	}
+
+	during, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(during) != string(before) {
+		t.Fatalf("checkpoint JSON was rewritten before Close")
+	}
+	journal, err := os.ReadFile(path + ".journal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Count(string(journal), "\n"), itemCount+1; got != want {
+		t.Fatalf("journal records = %d, want %d", got, want)
+	}
+	active, ok := readImportCheckpoint(path, target)
+	if !ok || len(active.Items) != itemCount+1 || active.PersonAvatars["person-one"].Status != "uploaded" {
+		t.Fatalf("active checkpoint did not merge JSON and journal: %#v", active)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".journal"); !os.IsNotExist(err) {
+		t.Fatalf("journal should be removed after compaction, stat err = %v", err)
+	}
+	compacted, ok := readImportCheckpoint(path, target)
+	if !ok || len(compacted.Items) != itemCount+1 || compacted.PersonAvatars["person-one"].Status != "uploaded" {
+		t.Fatalf("compacted checkpoint is incomplete: %#v", compacted)
+	}
+}
+
+func TestImportCheckpointRecoversDurableJournalAfterInterruptedWrite(t *testing.T) {
+	exportDir := t.TempDir()
+	path := filepath.Join(exportDir, "import-checkpoint.json")
+	target := ImportTarget{ServerID: "target-a"}
+	interrupted := newImportCheckpointStore(exportDir, target)
+	if err := interrupted.Record(ImportMatch{StableKey: "item-one", TargetID: "target-one", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := interrupted.RecordPersonAvatar(personImageResult{StableKey: "person-one", Name: "Person One", TargetID: "person-target"}); err != nil {
+		t.Fatal(err)
+	}
+	interrupted.mu.Lock()
+	if err := interrupted.journal.Close(); err != nil {
+		interrupted.mu.Unlock()
+		t.Fatal(err)
+	}
+	interrupted.closed = true
+	interrupted.mu.Unlock()
+	file, err := os.OpenFile(path+".journal", os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(`{"schemaVersion":1,"kind":"item"`); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, ok := readImportCheckpoint(path, target)
+	if !ok || recovered.Items["item-one"].Status != "updated" || recovered.PersonAvatars["person-one"].Status != "uploaded" {
+		t.Fatalf("durable journal was not recovered: %#v", recovered)
+	}
+	store := newImportCheckpointStore(exportDir, target)
+	if err := store.Record(ImportMatch{StableKey: "item-two", TargetID: "target-two", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	if err := store.journal.Close(); err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	store.closed = true
+	store.mu.Unlock()
+	recoveredAgain, ok := readImportCheckpoint(path, target)
+	if !ok || len(recoveredAgain.Items) != 2 {
+		t.Fatalf("record appended after a torn tail was not recoverable: %#v", recoveredAgain)
+	}
+	compactor := newImportCheckpointStore(exportDir, target)
+	if err := compactor.Record(ImportMatch{StableKey: "item-three", TargetID: "target-three", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := compactor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compacted, ok := readImportCheckpoint(path, target)
+	if !ok || len(compacted.Items) != 3 || compacted.PersonAvatars["person-one"].Status != "uploaded" {
+		t.Fatalf("recovered journal did not compact correctly: %#v", compacted)
 	}
 }
 
@@ -728,6 +866,79 @@ func TestSummaryLines(t *testing.T) {
 	})
 	if want := "导入验证总结：项目 2 个，匹配 1 个，未匹配 0 个，歧义 1 个，错误 0 个，用时 1秒；本次未写入元数据和图片。"; dryRunLine != want {
 		t.Fatalf("dry-run importSummaryLine = %q, want %q", dryRunLine, want)
+	}
+}
+
+func TestExportPublishesFinalDirectoryWithoutPartialDirectory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.9.5.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			writeExporterJSON(t, w, map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0})
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(t.TempDir())
+	j := job.NewManager().Create("export")
+	j.Start()
+	result, err := service.Export(context.Background(), j, ExportRequest{
+		Connection: emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries:  []emby.Library{{ID: "lib", Name: "Movies"}},
+		SkipImages: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasSuffix(result.Path, ".partial") {
+		t.Fatalf("published path must not be partial: %s", result.Path)
+	}
+	if _, err := os.Stat(filepath.Join(result.Path, "manifest.json")); err != nil {
+		t.Fatalf("published manifest missing: %v", err)
+	}
+	if _, err := os.Stat(result.Path + ".partial"); !os.IsNotExist(err) {
+		t.Fatalf("partial directory remains after success: %v", err)
+	}
+}
+
+func TestExportCancellationRemovesPartialDirectory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info":
+			writeExporterJSON(t, w, map[string]any{"ServerName": "Mock Emby", "Version": "4.9.5.0", "Id": "mock"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items" && r.URL.Query().Get("ParentId") == "first":
+			writeExporterJSON(t, w, map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0})
+			cancel()
+		default:
+			http.Error(w, r.Method+" "+r.URL.String(), http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(t.TempDir())
+	j := job.NewManager().Create("export")
+	j.Start()
+	_, err := service.Export(ctx, j, ExportRequest{
+		Connection: emby.Connection{BaseURL: server.URL, APIKey: "test-key"},
+		Libraries: []emby.Library{
+			{ID: "first", Name: "Movies"},
+			{ID: "second", Name: "Series"},
+		},
+		SkipImages: true,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Export error = %v, want context.Canceled", err)
+	}
+	entries, readErr := os.ReadDir(service.ExportsDir())
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("canceled export left directories: %#v", entries)
 	}
 }
 
@@ -2393,6 +2604,7 @@ func TestImportPeopleImagesRecordsAndResumesPersonAvatarCheckpoint(t *testing.T)
 	}
 	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
 	checkpoint := newImportCheckpointStore(exportPath, target)
+	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.RecordPersonAvatar(personImageResult{StableKey: "person-one", Name: "Actor One", TargetID: "person-target-one"}); err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,7 @@ type Config struct {
 	AdminPassword         string
 	SessionSecret         string
 	MaxMemoryLogEntries   int
+	MaxConcurrency        int
 	MaxCompletedJobs      int
 	CompletedJobRetention time.Duration
 	ReleaseMemoryOnFinish bool
@@ -31,10 +32,11 @@ func FromEnv() Config {
 		ImportRoot:            env("EMBY_MIGRATOR_IMPORT_ROOT", "/imports"),
 		EmbyDatabaseRoot:      strings.TrimSpace(os.Getenv("EMBY_MIGRATOR_EMBY_DB_ROOT")),
 		DockerHost:            env("EMBY_MIGRATOR_DOCKER_HOST", "unix:///var/run/docker.sock"),
-		Version:               env("EMBY_MIGRATOR_VERSION", "1.1.3"),
+		Version:               env("EMBY_MIGRATOR_VERSION", "1.1.4"),
 		AdminPassword:         env("EMBY_MIGRATOR_PASSWORD", "password"),
 		SessionSecret:         os.Getenv("EMBY_MIGRATOR_SESSION_SECRET"),
 		MaxMemoryLogEntries:   envInt("EMBY_MIGRATOR_MAX_MEMORY_LOGS", 2000),
+		MaxConcurrency:        envInt("EMBY_MIGRATOR_MAX_CONCURRENCY", 64),
 		MaxCompletedJobs:      envInt("EMBY_MIGRATOR_MAX_COMPLETED_JOBS", 20),
 		CompletedJobRetention: time.Duration(envInt("EMBY_MIGRATOR_JOB_RETENTION_HOURS", 24)) * time.Hour,
 		ReleaseMemoryOnFinish: envBool("EMBY_MIGRATOR_RELEASE_MEMORY_ON_FINISH", true),

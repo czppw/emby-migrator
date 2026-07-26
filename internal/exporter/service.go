@@ -1,12 +1,14 @@
 package exporter
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -213,6 +215,13 @@ type importCheckpoint struct {
 	UpdatedAt     time.Time                   `json:"updatedAt"`
 	Items         map[string]ImportCheckpoint `json:"items,omitempty"`
 	PersonAvatars map[string]ImportCheckpoint `json:"personAvatars,omitempty"`
+}
+
+type importCheckpointJournalEntry struct {
+	SchemaVersion int              `json:"schemaVersion"`
+	Target        ImportTarget     `json:"target,omitempty"`
+	Kind          string           `json:"kind"`
+	Checkpoint    ImportCheckpoint `json:"checkpoint"`
 }
 
 type ImportCheckpoint struct {
@@ -577,8 +586,28 @@ func (s *Service) uniqueExportDirectory(baseName string) (string, string) {
 		}
 		dir := filepath.Join(s.ExportsDir(), name)
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			if _, err := os.Stat(dir + ".partial"); !os.IsNotExist(err) {
+				continue
+			}
 			return name, dir
 		}
+	}
+}
+
+func (s *Service) createPartialExportDirectory(baseName string) (string, string, string, error) {
+	if err := os.MkdirAll(s.ExportsDir(), 0o755); err != nil {
+		return "", "", "", err
+	}
+	for {
+		name, finalDir := s.uniqueExportDirectory(baseName)
+		partialDir := finalDir + ".partial"
+		if err := os.Mkdir(partialDir, 0o755); err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", "", "", err
+		}
+		return name, finalDir, partialDir, nil
 	}
 }
 
@@ -1077,7 +1106,7 @@ func safePackagePath(root, relPath string) (string, error) {
 	return resolved, nil
 }
 
-func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (ExportResult, error) {
+func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (result ExportResult, err error) {
 	startedAt := time.Now()
 	client, err := emby.NewClient(req.Connection.BaseURL, req.Connection.APIKey)
 	if err != nil {
@@ -1125,10 +1154,19 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 	}
 
 	exportedAt := time.Now()
-	exportName, exportDir := s.uniqueExportDirectory(exportDirectoryName(exportedAt, info.ServerName, libraries))
-	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+	exportName, finalExportDir, exportDir, err := s.createPartialExportDirectory(exportDirectoryName(exportedAt, info.ServerName, libraries))
+	if err != nil {
 		return ExportResult{}, err
 	}
+	published := false
+	defer func() {
+		if !published {
+			if cleanupErr := os.RemoveAll(exportDir); cleanupErr != nil {
+				result = ExportResult{}
+				err = errors.Join(err, fmt.Errorf("remove partial export package: %w", cleanupErr))
+			}
+		}
+	}()
 	manifest := storage.Manifest{
 		ToolVersion:   req.ToolVersion,
 		EmbyVersion:   info.Version,
@@ -1226,9 +1264,13 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (Ex
 	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), manifest); err != nil {
 		return ExportResult{}, err
 	}
-	j.Log("info", "导出完成：%s", exportDir)
+	if err := os.Rename(exportDir, finalExportDir); err != nil {
+		return ExportResult{}, fmt.Errorf("publish export package: %w", err)
+	}
+	published = true
+	j.Log("info", "导出完成：%s", finalExportDir)
 	j.Log("info", exportSummaryLine(manifest.Summary, time.Since(startedAt)))
-	return ExportResult{Path: exportDir, Manifest: manifest}, nil
+	return ExportResult{Path: finalExportDir, Manifest: manifest}, nil
 }
 
 func exportSummaryLine(summary storage.Summary, elapsed time.Duration) string {
@@ -2007,7 +2049,7 @@ func sortedPeopleFingerprint(values []emby.Person) []string {
 	return out
 }
 
-func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (ImportResult, error) {
+func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (result ImportResult, err error) {
 	client, err := emby.NewClient(req.Connection.BaseURL, req.Connection.APIKey)
 	if err != nil {
 		return ImportResult{}, err
@@ -2083,6 +2125,16 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (Im
 	}
 	cache := newImportLookupCache()
 	checkpoint := newImportCheckpointStore(exportPath, report.Target)
+	defer func() {
+		if closeErr := checkpoint.Close(); closeErr != nil {
+			if err == nil {
+				result = ImportResult{}
+				err = fmt.Errorf("flush import checkpoint: %w", closeErr)
+				return
+			}
+			j.Log("warn", "关闭断点状态失败：%v", closeErr)
+		}
+	}()
 	itemResults, err := s.importItems(ctx, j, client, cache, exportPath, items, req, concurrency, func(match ImportMatch) {
 		if shouldCheckpointMatch(match, req.DryRun) {
 			if err := checkpoint.Record(match); err != nil {
@@ -2352,14 +2404,90 @@ func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, 
 }
 
 func readImportCheckpoint(path string, target ImportTarget) (importCheckpoint, bool) {
-	var checkpoint importCheckpoint
-	if err := storage.ReadJSON(path, &checkpoint); err != nil {
+	checkpoint, found, err := loadImportCheckpoint(path)
+	if err != nil || !found {
 		return importCheckpoint{}, false
 	}
 	if !sameImportTarget(checkpoint.Target, target) {
 		return importCheckpoint{}, false
 	}
 	return checkpoint, true
+}
+
+func loadImportCheckpoint(path string) (importCheckpoint, bool, error) {
+	checkpoint := importCheckpoint{}
+	found := false
+	if err := storage.ReadJSON(path, &checkpoint); err == nil {
+		found = true
+	} else if !os.IsNotExist(err) {
+		return importCheckpoint{}, false, err
+	}
+
+	journal, journalFound, err := replayImportCheckpointJournal(path+".journal", checkpoint)
+	if err != nil {
+		return importCheckpoint{}, false, err
+	}
+	if journalFound {
+		checkpoint = journal
+		found = true
+	}
+	return checkpoint, found, nil
+}
+
+func replayImportCheckpointJournal(path string, checkpoint importCheckpoint) (importCheckpoint, bool, error) {
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return checkpoint, false, nil
+	}
+	if err != nil {
+		return importCheckpoint{}, false, err
+	}
+	defer file.Close()
+
+	found := false
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry importCheckpointJournalEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			// A process can stop in the middle of the final append. Earlier durable
+			// entries remain valid, so ignore malformed journal records.
+			continue
+		}
+		if strings.TrimSpace(entry.Checkpoint.StableKey) == "" {
+			continue
+		}
+		if !sameImportTarget(checkpoint.Target, entry.Target) {
+			checkpoint = importCheckpoint{
+				SchemaVersion: 1,
+				Target:        entry.Target,
+				Items:         map[string]ImportCheckpoint{},
+				PersonAvatars: map[string]ImportCheckpoint{},
+			}
+		}
+		if checkpoint.Items == nil {
+			checkpoint.Items = map[string]ImportCheckpoint{}
+		}
+		if checkpoint.PersonAvatars == nil {
+			checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
+		}
+		checkpoint.SchemaVersion = 1
+		checkpoint.Target = entry.Target
+		checkpoint.UpdatedAt = entry.Checkpoint.UpdatedAt
+		switch entry.Kind {
+		case "item":
+			checkpoint.Items[entry.Checkpoint.StableKey] = entry.Checkpoint
+		case "person-avatar":
+			checkpoint.PersonAvatars[entry.Checkpoint.StableKey] = entry.Checkpoint
+		default:
+			continue
+		}
+		found = true
+	}
+	if err := scanner.Err(); err != nil {
+		return importCheckpoint{}, false, err
+	}
+	return checkpoint, found, nil
 }
 
 func shouldResumeStatus(status string, dryRun bool) bool {
@@ -2429,16 +2557,114 @@ func firstNonEmpty(values ...string) string {
 }
 
 type importCheckpointStore struct {
-	path   string
-	target ImportTarget
-	mu     sync.Mutex
+	path             string
+	journalPath      string
+	target           ImportTarget
+	mu               sync.Mutex
+	checkpoint       importCheckpoint
+	journal          *os.File
+	initialized      bool
+	dirty            bool
+	closed           bool
+	recordsSinceSync int
 }
+
+const importCheckpointSyncInterval = 25
 
 func newImportCheckpointStore(exportPath string, target ImportTarget) *importCheckpointStore {
 	return &importCheckpointStore{
-		path:   filepath.Join(exportPath, "import-checkpoint.json"),
-		target: target,
+		path:        filepath.Join(exportPath, "import-checkpoint.json"),
+		journalPath: filepath.Join(exportPath, "import-checkpoint.json.journal"),
+		target:      target,
 	}
+}
+
+func (s *importCheckpointStore) initializeLocked() error {
+	if s.initialized {
+		return nil
+	}
+	checkpoint, found, err := loadImportCheckpoint(s.path)
+	if err != nil {
+		return err
+	}
+	if !found || !sameImportTarget(checkpoint.Target, s.target) {
+		checkpoint = importCheckpoint{
+			SchemaVersion: 1,
+			Target:        s.target,
+			Items:         map[string]ImportCheckpoint{},
+			PersonAvatars: map[string]ImportCheckpoint{},
+		}
+	}
+	if checkpoint.Items == nil {
+		checkpoint.Items = map[string]ImportCheckpoint{}
+	}
+	if checkpoint.PersonAvatars == nil {
+		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
+	}
+	if _, err := os.Stat(s.journalPath); err == nil {
+		s.dirty = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.journalPath), 0o755); err != nil {
+		return err
+	}
+	journal, err := os.OpenFile(s.journalPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	info, err := journal.Stat()
+	if err != nil {
+		_ = journal.Close()
+		return err
+	}
+	if info.Size() > 0 {
+		last := []byte{0}
+		if _, err := journal.ReadAt(last, info.Size()-1); err != nil && err != io.EOF {
+			_ = journal.Close()
+			return err
+		}
+		if last[0] != '\n' {
+			if _, err := journal.Write([]byte{'\n'}); err != nil {
+				_ = journal.Close()
+				return err
+			}
+			if err := journal.Sync(); err != nil {
+				_ = journal.Close()
+				return err
+			}
+		}
+	}
+	s.checkpoint = checkpoint
+	s.journal = journal
+	s.initialized = true
+	return nil
+}
+
+func (s *importCheckpointStore) appendLocked(kind string, checkpoint ImportCheckpoint) error {
+	entry := importCheckpointJournalEntry{
+		SchemaVersion: 1,
+		Target:        s.target,
+		Kind:          kind,
+		Checkpoint:    checkpoint,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if _, err := s.journal.Write(data); err != nil {
+		return err
+	}
+	s.dirty = true
+	s.recordsSinceSync++
+	if s.recordsSinceSync >= importCheckpointSyncInterval {
+		if err := s.journal.Sync(); err != nil {
+			return err
+		}
+		s.recordsSinceSync = 0
+	}
+	return nil
 }
 
 func (s *importCheckpointStore) Record(match ImportMatch) error {
@@ -2447,22 +2673,14 @@ func (s *importCheckpointStore) Record(match ImportMatch) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	checkpoint := importCheckpoint{SchemaVersion: 1, Target: s.target, Items: map[string]ImportCheckpoint{}}
-	if err := storage.ReadJSON(s.path, &checkpoint); err != nil && !os.IsNotExist(err) {
+	if s.closed {
+		return errors.New("import checkpoint store is closed")
+	}
+	if err := s.initializeLocked(); err != nil {
 		return err
 	}
-	if !sameImportTarget(checkpoint.Target, s.target) {
-		checkpoint.Items = map[string]ImportCheckpoint{}
-		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
-	}
-	if checkpoint.Items == nil {
-		checkpoint.Items = map[string]ImportCheckpoint{}
-	}
 	now := time.Now()
-	checkpoint.SchemaVersion = 1
-	checkpoint.Target = s.target
-	checkpoint.UpdatedAt = now
-	checkpoint.Items[match.StableKey] = ImportCheckpoint{
+	value := ImportCheckpoint{
 		StableKey:        match.StableKey,
 		SourceName:       match.SourceName,
 		TargetID:         firstNonEmpty(match.TargetID, match.TargetEmbyID),
@@ -2474,7 +2692,14 @@ func (s *importCheckpointStore) Record(match ImportMatch) error {
 		MediaInfoFailed:  match.MediaInfoFailed,
 		UpdatedAt:        now,
 	}
-	return storage.WriteJSON(s.path, checkpoint)
+	if err := s.appendLocked("item", value); err != nil {
+		return err
+	}
+	s.checkpoint.SchemaVersion = 1
+	s.checkpoint.Target = s.target
+	s.checkpoint.UpdatedAt = now
+	s.checkpoint.Items[match.StableKey] = value
+	return nil
 }
 
 func (s *importCheckpointStore) RecordPersonAvatar(result personImageResult) error {
@@ -2483,32 +2708,103 @@ func (s *importCheckpointStore) RecordPersonAvatar(result personImageResult) err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	checkpoint := importCheckpoint{SchemaVersion: 1, Target: s.target, Items: map[string]ImportCheckpoint{}, PersonAvatars: map[string]ImportCheckpoint{}}
-	if err := storage.ReadJSON(s.path, &checkpoint); err != nil && !os.IsNotExist(err) {
+	if s.closed {
+		return errors.New("import checkpoint store is closed")
+	}
+	if err := s.initializeLocked(); err != nil {
 		return err
 	}
-	if !sameImportTarget(checkpoint.Target, s.target) {
-		checkpoint.Items = map[string]ImportCheckpoint{}
-		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
-	}
-	if checkpoint.Items == nil {
-		checkpoint.Items = map[string]ImportCheckpoint{}
-	}
-	if checkpoint.PersonAvatars == nil {
-		checkpoint.PersonAvatars = map[string]ImportCheckpoint{}
-	}
 	now := time.Now()
-	checkpoint.SchemaVersion = 1
-	checkpoint.Target = s.target
-	checkpoint.UpdatedAt = now
-	checkpoint.PersonAvatars[result.StableKey] = ImportCheckpoint{
+	value := ImportCheckpoint{
 		StableKey:  result.StableKey,
 		SourceName: result.Name,
 		TargetID:   result.TargetID,
 		Status:     "uploaded",
 		UpdatedAt:  now,
 	}
-	return storage.WriteJSON(s.path, checkpoint)
+	if err := s.appendLocked("person-avatar", value); err != nil {
+		return err
+	}
+	s.checkpoint.SchemaVersion = 1
+	s.checkpoint.Target = s.target
+	s.checkpoint.UpdatedAt = now
+	s.checkpoint.PersonAvatars[result.StableKey] = value
+	return nil
+}
+
+func (s *importCheckpointStore) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if !s.initialized {
+		return nil
+	}
+	if err := s.journal.Sync(); err != nil {
+		_ = s.journal.Close()
+		return err
+	}
+	if err := s.journal.Close(); err != nil {
+		return err
+	}
+	if !s.dirty {
+		if err := os.Remove(s.journalPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	checkpoint, found, err := loadImportCheckpoint(s.path)
+	if err != nil {
+		return err
+	}
+	if found && sameImportTarget(checkpoint.Target, s.target) {
+		s.checkpoint = checkpoint
+	}
+	if err := writeImportCheckpointAtomic(s.path, s.checkpoint); err != nil {
+		return err
+	}
+	if err := os.Remove(s.journalPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func writeImportCheckpointAtomic(path string, checkpoint importCheckpoint) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(checkpoint, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	temp, err := os.CreateTemp(filepath.Dir(path), ".import-checkpoint-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o644); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 func emptyDash(value string) string {

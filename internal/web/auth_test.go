@@ -2,7 +2,10 @@ package web
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -11,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"emby-migrator/internal/config"
 	"emby-migrator/internal/exporter"
@@ -321,6 +325,185 @@ func TestDefaultAdminPasswordCanBePromotedToUsersConfig(t *testing.T) {
 	}, http.StatusOK)
 }
 
+func TestLegacySHA256PasswordHashMigratesToBcryptAfterSuccessfulLogin(t *testing.T) {
+	configDir := t.TempDir()
+	salt := []byte("legacy-test-salt")
+	sum := saltedPasswordSum([]byte("legacy-password"), salt)
+	legacyHash := legacyPasswordHashPrefix + "v1:" + base64.RawURLEncoding.EncodeToString(salt) + ":" + hex.EncodeToString(sum[:])
+	writeUsersFile(t, configDir, usersConfig{Users: []configUser{{
+		Username:     "admin",
+		PasswordHash: legacyHash,
+		Role:         "admin",
+	}}})
+	app, client := newAuthTestServer(t, configDir, "unused")
+	defer app.Close()
+
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "admin",
+		"password": "wrong-password",
+	}, http.StatusUnauthorized)
+	var before usersConfig
+	if err := readJSONFile(filepath.Join(configDir, usersFileName), &before); err != nil {
+		t.Fatal(err)
+	}
+	if before.Users[0].PasswordHash != legacyHash {
+		t.Fatalf("legacy hash changed after failed login: %q", before.Users[0].PasswordHash)
+	}
+
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "admin",
+		"password": "legacy-password",
+	}, http.StatusOK)
+	var after usersConfig
+	if err := readJSONFile(filepath.Join(configDir, usersFileName), &after); err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Users) != 1 || !strings.HasPrefix(after.Users[0].PasswordHash, passwordHashPrefix) {
+		t.Fatalf("legacy hash was not migrated to bcrypt: %#v", after.Users)
+	}
+	if !after.Users[0].verifyPassword("legacy-password") {
+		t.Fatal("migrated bcrypt hash does not verify")
+	}
+	if after.Users[0].SessionVersion != defaultUserSessionVersion {
+		t.Fatalf("sessionVersion = %d, want %d", after.Users[0].SessionVersion, defaultUserSessionVersion)
+	}
+}
+
+func TestPasswordOnlyChangeInvalidatesAllExistingSessions(t *testing.T) {
+	configDir := t.TempDir()
+	writeUsersFile(t, configDir, usersConfig{Users: []configUser{{
+		Username: "admin", Password: "old-password", Role: "admin",
+	}}})
+	app, client := newAuthTestServer(t, configDir, "unused")
+	defer app.Close()
+	otherJar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherClient := &http.Client{Transport: app.Client().Transport, Jar: otherJar}
+	for _, loginClient := range []*http.Client{client, otherClient} {
+		postJSONRaw(t, loginClient, app.URL+"/api/auth/login", map[string]string{
+			"username": "admin", "password": "old-password",
+		}, http.StatusOK)
+	}
+
+	postJSONRaw(t, client, app.URL+"/api/auth/password", map[string]string{
+		"oldPassword": "old-password", "newPassword": "new-password",
+	}, http.StatusOK)
+	for _, oldClient := range []*http.Client{client, otherClient} {
+		var status authStatusResponse
+		if err := json.Unmarshal(getRaw(t, oldClient, app.URL+"/api/auth/status", http.StatusOK), &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.Authenticated {
+			t.Fatalf("session remained authenticated after password change: %#v", status)
+		}
+	}
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "admin", "password": "new-password",
+	}, http.StatusOK)
+
+	var disk usersConfig
+	if err := readJSONFile(filepath.Join(configDir, usersFileName), &disk); err != nil {
+		t.Fatal(err)
+	}
+	if disk.Users[0].SessionVersion != defaultUserSessionVersion+1 {
+		t.Fatalf("sessionVersion = %d, want %d", disk.Users[0].SessionVersion, defaultUserSessionVersion+1)
+	}
+}
+
+func TestLoginRateLimitAndSuccessfulLoginReset(t *testing.T) {
+	app, client := newAuthTestServer(t, t.TempDir(), "correct-password")
+	defer app.Close()
+
+	for i := 1; i < loginMaxFailures; i++ {
+		postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+			"username": "admin", "password": "wrong-password",
+		}, http.StatusUnauthorized)
+	}
+	resp := postJSONResponse(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "ADMIN", "password": "wrong-password",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("fifth failed login status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("rate-limited response is missing Retry-After")
+	}
+	postJSONRaw(t, client, app.URL+"/api/auth/login", map[string]string{
+		"username": "admin", "password": "correct-password",
+	}, http.StatusTooManyRequests)
+
+	resetApp, resetClient := newAuthTestServer(t, t.TempDir(), "correct-password")
+	defer resetApp.Close()
+	for i := 0; i < loginMaxFailures-1; i++ {
+		postJSONRaw(t, resetClient, resetApp.URL+"/api/auth/login", map[string]string{
+			"username": "admin", "password": "wrong-password",
+		}, http.StatusUnauthorized)
+	}
+	postJSONRaw(t, resetClient, resetApp.URL+"/api/auth/login", map[string]string{
+		"username": "admin", "password": "correct-password",
+	}, http.StatusOK)
+	for i := 0; i < loginMaxFailures-1; i++ {
+		postJSONRaw(t, resetClient, resetApp.URL+"/api/auth/login", map[string]string{
+			"username": "admin", "password": "wrong-password",
+		}, http.StatusUnauthorized)
+	}
+}
+
+func TestExpiredLoginRateLimitIsCleanedUp(t *testing.T) {
+	s := &Server{loginAttempts: make(map[string]loginAttemptState)}
+	now := time.Now()
+	for i := 0; i < loginMaxFailures; i++ {
+		s.recordLoginFailure("client:admin", now)
+	}
+	if _, blocked := s.loginBlocked("client:admin", now); !blocked {
+		t.Fatal("expected login to be blocked")
+	}
+	if _, blocked := s.loginBlocked("client:admin", now.Add(loginRateLimitWindow+time.Second)); blocked {
+		t.Fatal("expired login block was not removed")
+	}
+}
+
+func TestForwardedHTTPSProducesSecureSessionCookies(t *testing.T) {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "http://example.test/api/auth/login", nil)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if cookie := s.sessionCookie(r, "token"); !cookie.Secure {
+		t.Fatal("session cookie is not Secure behind HTTPS proxy")
+	}
+	w := httptest.NewRecorder()
+	s.clearSessionCookie(w, r)
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("cleared session cookie is not Secure: %#v", cookies)
+	}
+}
+
+func TestSessionRandomFailureDoesNotUsePredictableFallback(t *testing.T) {
+	original := readSecureRandom
+	readSecureRandom = func([]byte) (int, error) { return 0, errors.New("entropy unavailable") }
+	defer func() { readSecureRandom = original }()
+
+	s := &Server{sessionSecret: []byte("test-secret")}
+	if token, err := s.newSessionToken(defaultPrincipal()); err == nil || token != "" {
+		t.Fatalf("newSessionToken() = %q, %v; want empty token and error", token, err)
+	}
+}
+
+func TestSessionSecretRandomFailurePanics(t *testing.T) {
+	original := readSecureRandom
+	readSecureRandom = func([]byte) (int, error) { return 0, errors.New("entropy unavailable") }
+	defer func() { readSecureRandom = original }()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("makeSessionSecret did not fail closed")
+		}
+	}()
+	makeSessionSecret("")
+}
+
 func newAuthTestServer(t *testing.T, configDir, adminPassword string) (*httptest.Server, *http.Client) {
 	t.Helper()
 	app := httptest.NewServer(NewServer(
@@ -370,6 +553,19 @@ func postJSONRaw(t *testing.T, client *http.Client, url string, payload any, wan
 		t.Fatalf("POST %s status = %d, want %d, body=%s", url, resp.StatusCode, wantStatus, strings.TrimSpace(string(data)))
 	}
 	return data
+}
+
+func postJSONResponse(t *testing.T, client *http.Client, url string, payload any) *http.Response {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 func getRaw(t *testing.T, client *http.Client, url string, wantStatus int) []byte {

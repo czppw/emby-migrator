@@ -1,7 +1,6 @@
 package web
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -14,12 +13,16 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
-	usersFileName       = "users.json"
-	passwordHashPrefix  = "sha256:"
-	passwordHashVersion = 1
+	usersFileName             = "users.json"
+	passwordHashPrefix        = "$2"
+	legacyPasswordHashPrefix  = "sha256:"
+	legacyPasswordHashVersion = 1
+	defaultUserSessionVersion = 1
 )
 
 type userRole string
@@ -42,10 +45,11 @@ type usersConfig struct {
 }
 
 type configUser struct {
-	Username     string `json:"username"`
-	Password     string `json:"password,omitempty"`
-	PasswordHash string `json:"passwordHash,omitempty"`
-	Role         string `json:"role"`
+	Username       string `json:"username"`
+	Password       string `json:"password,omitempty"`
+	PasswordHash   string `json:"passwordHash,omitempty"`
+	Role           string `json:"role"`
+	SessionVersion int    `json:"sessionVersion,omitempty"`
 }
 
 type cachedUsersConfig struct {
@@ -97,7 +101,12 @@ func (s *Server) authenticateConfiguredUser(cfg usersConfig, username, password 
 			return authPrincipal{}, false, nil
 		}
 		if user.verifyPassword(password) {
-			return authPrincipal{Username: strings.TrimSpace(user.Username), Role: string(role)}, true, nil
+			if passwordHashNeedsUpgrade(user.PasswordHash) {
+				if err := s.upgradePasswordHash(user.Username, password); err != nil {
+					return authPrincipal{}, false, err
+				}
+			}
+			return authPrincipal{Username: strings.TrimSpace(user.Username), Role: string(role), SessionVersion: normalizedSessionVersion(user.SessionVersion)}, true, nil
 		}
 		return authPrincipal{}, false, nil
 	}
@@ -117,6 +126,8 @@ func (s *Server) changeCurrentUsername(username, currentPassword, newUsername st
 }
 
 func (s *Server) changeCurrentAccount(username, currentPassword, newUsername, newPassword string) (string, error) {
+	s.usersWriteMu.Lock()
+	defer s.usersWriteMu.Unlock()
 	newUsername = strings.TrimSpace(newUsername)
 	if err := validateUsername(newUsername); err != nil {
 		return "", err
@@ -130,6 +141,7 @@ func (s *Server) changeCurrentAccount(username, currentPassword, newUsername, ne
 	if err != nil {
 		return "", err
 	}
+	cfg.Users = append([]configUser(nil), cfg.Users...)
 	if len(cfg.Users) == 0 {
 		if !sameLoginName(username, "admin") || !constantTimeStringEqual(currentPassword, s.cfg.AdminPassword) {
 			return "", fmt.Errorf("invalid current password")
@@ -145,9 +157,10 @@ func (s *Server) changeCurrentAccount(username, currentPassword, newUsername, ne
 		cfg = usersConfig{
 			SchemaVersion: 1,
 			Users: []configUser{{
-				Username:     newUsername,
-				PasswordHash: hash,
-				Role:         string(roleAdmin),
+				Username:       newUsername,
+				PasswordHash:   hash,
+				Role:           string(roleAdmin),
+				SessionVersion: defaultUserSessionVersion + 1,
 			}},
 		}
 		if err := writeUsersConfig(s.usersPath(), cfg); err != nil {
@@ -174,6 +187,7 @@ func (s *Server) changeCurrentAccount(username, currentPassword, newUsername, ne
 		return "", fmt.Errorf("invalid current password")
 	}
 	cfg.Users[currentIndex].Username = newUsername
+	cfg.Users[currentIndex].SessionVersion = normalizedSessionVersion(cfg.Users[currentIndex].SessionVersion) + 1
 	if passwordChanged {
 		hash, err := newPasswordHash(newPassword)
 		if err != nil {
@@ -213,14 +227,14 @@ func (s *Server) principalActive(principal authPrincipal) bool {
 		return false
 	}
 	if len(cfg.Users) == 0 {
-		return sameLoginName(principal.Username, "admin") && principal.Role == string(roleAdmin)
+		return sameLoginName(principal.Username, "admin") && principal.Role == string(roleAdmin) && principal.SessionVersion == defaultUserSessionVersion
 	}
 	for _, user := range cfg.Users {
 		if !sameLoginName(principal.Username, user.Username) {
 			continue
 		}
 		role, ok := normalizeRole(user.Role)
-		return ok && principal.Role == string(role)
+		return ok && principal.Role == string(role) && principal.SessionVersion == normalizedSessionVersion(user.SessionVersion)
 	}
 	return false
 }
@@ -246,8 +260,11 @@ func (u configUser) verifyPassword(password string) bool {
 
 func verifyPasswordHash(password, encoded string) bool {
 	encoded = strings.TrimSpace(encoded)
+	if strings.HasPrefix(encoded, passwordHashPrefix) {
+		return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil
+	}
 	parts := strings.Split(encoded, ":")
-	if len(parts) != 4 || parts[0] != "sha256" || parts[1] != "v1" {
+	if len(parts) != 4 || parts[0]+":" != legacyPasswordHashPrefix || parts[1] != fmt.Sprintf("v%d", legacyPasswordHashVersion) {
 		return false
 	}
 	salt, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -274,12 +291,54 @@ func subtleHashEqual(a, b []byte) bool {
 }
 
 func newPasswordHash(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("generate password salt: %w", err)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
 	}
-	sum := saltedPasswordSum([]byte(password), salt)
-	return fmt.Sprintf("%sv%d:%s:%s", passwordHashPrefix, passwordHashVersion, base64.RawURLEncoding.EncodeToString(salt), hex.EncodeToString(sum[:])), nil
+	return string(hash), nil
+}
+
+func passwordHashNeedsUpgrade(encoded string) bool {
+	encoded = strings.TrimSpace(encoded)
+	return encoded != "" && !strings.HasPrefix(encoded, passwordHashPrefix)
+}
+
+func normalizedSessionVersion(version int) int {
+	if version <= 0 {
+		return defaultUserSessionVersion
+	}
+	return version
+}
+
+func (s *Server) upgradePasswordHash(username, password string) error {
+	s.usersWriteMu.Lock()
+	defer s.usersWriteMu.Unlock()
+	cfg, err := s.loadUsersConfig()
+	if err != nil {
+		return err
+	}
+	cfg.Users = append([]configUser(nil), cfg.Users...)
+	for i := range cfg.Users {
+		user := &cfg.Users[i]
+		if !sameLoginName(username, user.Username) {
+			continue
+		}
+		if !passwordHashNeedsUpgrade(user.PasswordHash) || !user.verifyPassword(password) {
+			return nil
+		}
+		hash, err := newPasswordHash(password)
+		if err != nil {
+			return err
+		}
+		user.Password = ""
+		user.PasswordHash = hash
+		if err := writeUsersConfig(s.usersPath(), cfg); err != nil {
+			return err
+		}
+		s.clearUsersCache()
+		return nil
+	}
+	return nil
 }
 
 func saltedPasswordSum(password, salt []byte) [32]byte {
@@ -386,6 +445,10 @@ func normalizeUsersConfig(cfg usersConfig) (usersConfig, bool, error) {
 		}
 		if strings.TrimSpace(user.PasswordHash) == "" {
 			return usersConfig{}, false, fmt.Errorf("users config entry %q is missing passwordHash", user.Username)
+		}
+		if user.SessionVersion <= 0 {
+			user.SessionVersion = defaultUserSessionVersion
+			changed = true
 		}
 		out = append(out, user)
 	}

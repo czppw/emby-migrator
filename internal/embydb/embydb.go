@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,12 +37,14 @@ type ApplyOptions struct {
 }
 
 type ApplyResult struct {
-	DatabasePath    string `json:"databasePath"`
-	BackupPath      string `json:"backupPath"`
-	ItemsApplied    int    `json:"itemsApplied"`
-	ItemsSkipped    int    `json:"itemsSkipped"`
-	StreamsWritten  int    `json:"streamsWritten"`
-	ChaptersWritten int    `json:"chaptersWritten"`
+	DatabasePath         string `json:"databasePath"`
+	BackupPath           string `json:"backupPath"`
+	BackupsPruned        int    `json:"backupsPruned,omitempty"`
+	BackupCleanupWarning string `json:"backupCleanupWarning,omitempty"`
+	ItemsApplied         int    `json:"itemsApplied"`
+	ItemsSkipped         int    `json:"itemsSkipped"`
+	StreamsWritten       int    `json:"streamsWritten"`
+	ChaptersWritten      int    `json:"chaptersWritten"`
 }
 
 func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
@@ -94,6 +97,11 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 	if err := backupDatabase(conn, backupPath, info.Mode().Perm()); err != nil {
 		return ApplyResult{}, fmt.Errorf("backup Emby database: %w", err)
 	}
+	result := ApplyResult{DatabasePath: databasePath, BackupPath: backupPath}
+	result.BackupsPruned, err = cleanupDatabaseBackups(databasePath, backupPath, 5, os.Remove)
+	if err != nil {
+		result.BackupCleanupWarning = err.Error()
+	}
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return ApplyResult{}, fmt.Errorf("target Emby database changed or became locked after backup; keep Emby stopped and retry: %w", err)
 	}
@@ -104,7 +112,6 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 		}
 	}()
 
-	result := ApplyResult{DatabasePath: databasePath, BackupPath: backupPath}
 	for _, item := range options.Items {
 		applied, streams, chapters, err := applyItem(ctx, conn, item, options.Overwrite)
 		if err != nil {
@@ -462,4 +469,70 @@ func backupDatabase(conn *sql.Conn, target string, mode os.FileMode) error {
 		return err
 	}
 	return os.Chmod(target, mode)
+}
+
+type databaseBackup struct {
+	path      string
+	timestamp time.Time
+}
+
+func cleanupDatabaseBackups(databasePath, currentBackupPath string, keep int, remove func(string) error) (int, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	directory := filepath.Dir(databasePath)
+	prefix := filepath.Base(databasePath) + ".emby-migrator-"
+	const timestampLayout = "20060102-150405.000000000"
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return 0, fmt.Errorf("list old Emby database backups: %w", err)
+	}
+
+	currentBackupPath = filepath.Clean(currentBackupPath)
+	backups := make([]databaseBackup, 0, len(entries))
+	warnings := make([]string, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".bak") || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		timestampText := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".bak")
+		timestamp, parseErr := time.ParseInLocation(timestampLayout, timestampText, time.Local)
+		if parseErr != nil || timestamp.Format(timestampLayout) != timestampText {
+			continue
+		}
+		entryInfo, infoErr := entry.Info()
+		if infoErr != nil {
+			warnings = append(warnings, fmt.Sprintf("inspect backup %s: %v", name, infoErr))
+			continue
+		}
+		if !entryInfo.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Clean(filepath.Join(directory, name))
+		if path == currentBackupPath {
+			continue
+		}
+		backups = append(backups, databaseBackup{path: path, timestamp: timestamp})
+	}
+
+	sort.Slice(backups, func(i, j int) bool {
+		return backups[i].timestamp.After(backups[j].timestamp)
+	})
+	deleteFrom := keep - 1 // The current backup always consumes one retention slot.
+	if deleteFrom > len(backups) {
+		deleteFrom = len(backups)
+	}
+	pruned := 0
+	for _, backup := range backups[deleteFrom:] {
+		if err := remove(backup.path); err != nil {
+			warnings = append(warnings, fmt.Sprintf("remove old backup %s: %v", filepath.Base(backup.path), err))
+			continue
+		}
+		pruned++
+	}
+	if len(warnings) > 0 {
+		return pruned, fmt.Errorf("backup retention cleanup incomplete: %s", strings.Join(warnings, "; "))
+	}
+	return pruned, nil
 }

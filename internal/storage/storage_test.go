@@ -2,12 +2,23 @@ package storage
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"emby-migrator/internal/emby"
 )
+
+func TestIntStringSupportsSignedIntRange(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	minInt := -maxInt - 1
+	for _, value := range []int{0, 42, -42, maxInt, minInt} {
+		if got, want := intString(value), strconv.Itoa(value); got != want {
+			t.Fatalf("intString(%d) = %q, want %q", value, got, want)
+		}
+	}
+}
 
 func TestSlugAndUniqueSlugPreventPathTraversalAndCollisions(t *testing.T) {
 	got := Slug("  Movie: The/Final? Cut  ")
