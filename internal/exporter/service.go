@@ -310,10 +310,11 @@ type exportItemTask struct {
 }
 
 type exportItemResult struct {
-	Index int
-	Item  emby.Item
-	Entry storage.ItemEntry
-	Err   error
+	Index  int
+	Item   emby.Item
+	Entry  storage.ItemEntry
+	Errors []storage.ErrorEntry
+	Err    error
 }
 
 type exportPersonImageTask struct {
@@ -430,7 +431,12 @@ func (c *importLookupCache) itemLookup(ctx context.Context, key string, fetch fu
 	c.mu.Unlock()
 
 	call.items, call.err = fetch()
+	c.mu.Lock()
+	if call.err != nil && c.itemCalls[key] == call {
+		delete(c.itemCalls, key)
+	}
 	close(call.ready)
+	c.mu.Unlock()
 	return cloneItems(call.items), call.err
 }
 
@@ -747,7 +753,7 @@ func uniquePaths(paths []string) []string {
 	return out
 }
 
-func (s *Service) latestBaselineManifest(source string, libraries []emby.Library, excludeName string) (storage.Manifest, string, string, bool) {
+func (s *Service) latestBaselineManifest(source string, libraries []emby.Library, options storage.ExportOptions, excludeName string) (storage.Manifest, string, string, bool) {
 	exports, err := s.ListExports()
 	if err != nil {
 		return storage.Manifest{}, "", "", false
@@ -768,9 +774,57 @@ func (s *Service) latestBaselineManifest(source string, libraries []emby.Library
 		if !sameLibrarySet(wantLibraries, manifest.Libraries) {
 			continue
 		}
+		if manifest.ExportOptions == nil || !sameExportOptions(*manifest.ExportOptions, options) {
+			continue
+		}
 		return manifest, name, filepath.Dir(path), true
 	}
 	return storage.Manifest{}, "", "", false
+}
+
+func normalizedExportOptions(req ExportRequest) storage.ExportOptions {
+	imageTypes := req.ImageTypes
+	if len(imageTypes) == 0 {
+		imageTypes = emby.DefaultImageTypes
+	}
+	normalized := make([]string, 0, len(imageTypes))
+	seen := make(map[string]struct{}, len(imageTypes))
+	for _, imageType := range imageTypes {
+		imageType = strings.ToLower(strings.TrimSpace(imageType))
+		if imageType == "" {
+			continue
+		}
+		if _, ok := seen[imageType]; ok {
+			continue
+		}
+		seen[imageType] = struct{}{}
+		normalized = append(normalized, imageType)
+	}
+	sort.Strings(normalized)
+	if req.SkipImages {
+		normalized = nil
+	}
+	return storage.ExportOptions{
+		SkipImages:          req.SkipImages,
+		ImageTypes:          normalized,
+		IncludePeopleImages: !req.SkipImages && req.IncludePeopleImages,
+		IncludeMediaInfo:    req.IncludeMediaInfo,
+	}
+}
+
+func sameExportOptions(left, right storage.ExportOptions) bool {
+	if left.SkipImages != right.SkipImages ||
+		left.IncludePeopleImages != right.IncludePeopleImages ||
+		left.IncludeMediaInfo != right.IncludeMediaInfo ||
+		len(left.ImageTypes) != len(right.ImageTypes) {
+		return false
+	}
+	for index := range left.ImageTypes {
+		if !strings.EqualFold(strings.TrimSpace(left.ImageTypes[index]), strings.TrimSpace(right.ImageTypes[index])) {
+			return false
+		}
+	}
+	return true
 }
 
 func libraryNameSet(libraries []emby.Library) map[string]bool {
@@ -1109,7 +1163,56 @@ func safePackagePath(root, relPath string) (string, error) {
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("package path escapes export package: %s", relPath)
 	}
-	return resolved, nil
+	canonicalRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve export package root: %w", err)
+	}
+	canonicalPath, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("resolve package path %s: %w", relPath, err)
+		}
+		if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("package path contains an unresolved symbolic link: %s", relPath)
+		}
+		canonicalPath, err = canonicalizeMissingPackagePath(resolved)
+		if err != nil {
+			return "", fmt.Errorf("resolve package path %s: %w", relPath, err)
+		}
+	}
+	canonicalRel, err := filepath.Rel(canonicalRoot, canonicalPath)
+	if err != nil {
+		return "", err
+	}
+	if canonicalRel == "." || canonicalRel == ".." || strings.HasPrefix(canonicalRel, ".."+string(os.PathSeparator)) || filepath.IsAbs(canonicalRel) {
+		return "", fmt.Errorf("package path escapes export package through symbolic link: %s", relPath)
+	}
+	if _, err := os.Stat(resolved); os.IsNotExist(err) {
+		return resolved, nil
+	}
+	return canonicalPath, nil
+}
+
+func canonicalizeMissingPackagePath(path string) (string, error) {
+	current := path
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", os.ErrNotExist
+		}
+		canonicalParent, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			remainder, relErr := filepath.Rel(parent, path)
+			if relErr != nil {
+				return "", relErr
+			}
+			return filepath.Join(canonicalParent, remainder), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		current = parent
+	}
 }
 
 func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (result ExportResult, err error) {
@@ -1173,10 +1276,12 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (re
 			}
 		}
 	}()
+	exportOptions := normalizedExportOptions(req)
 	manifest := storage.Manifest{
 		ToolVersion:   req.ToolVersion,
 		EmbyVersion:   info.Version,
 		ExportedAt:    exportedAt,
+		ExportOptions: &exportOptions,
 		SchemaVersion: 1,
 		Compatibility: "emby-4.8.11-first",
 		Source:        client.BaseURL,
@@ -1184,7 +1289,7 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (re
 	baselineItems := map[string]storage.ItemEntry{}
 	if req.Incremental {
 		manifest.Incremental = &storage.Incremental{Enabled: true, CreatedAt: time.Now()}
-		if baseline, baselineName, baselinePath, ok := s.latestBaselineManifest(client.BaseURL, libraries, exportName); ok {
+		if baseline, baselineName, baselinePath, ok := s.latestBaselineManifest(client.BaseURL, libraries, exportOptions, exportName); ok {
 			baselineItems = manifestItemsByStableKey(baseline)
 			manifest.Incremental.BaselineExportName = baselineName
 			manifest.Incremental.BaselineExportPath = filepath.ToSlash(baselinePath)
@@ -1228,6 +1333,7 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (re
 			return ExportResult{}, err
 		}
 		for _, result := range results {
+			manifest.Errors = append(manifest.Errors, result.Errors...)
 			if result.Err != nil {
 				manifest.Errors = append(manifest.Errors, storage.ErrorEntry{Scope: "item", ID: result.Item.ID, Name: result.Item.Name, Message: result.Err.Error()})
 				j.Log("warn", "导出项目失败：%s - %v", result.Item.Name, result.Err)
@@ -1253,9 +1359,11 @@ func (s *Service) Export(ctx context.Context, j *job.Job, req ExportRequest) (re
 		}
 	}
 	if !req.SkipImages && req.IncludePeopleImages {
-		if err := s.exportPeopleImages(ctx, j, client, exportDir, people, concurrency); err != nil {
+		imageErrors, err := s.exportPeopleImages(ctx, j, client, exportDir, people, concurrency)
+		if err != nil {
 			return ExportResult{}, err
 		}
+		manifest.Errors = append(manifest.Errors, imageErrors...)
 	}
 	for _, p := range people.entriesSorted() {
 		manifest.People = append(manifest.People, p)
@@ -1390,10 +1498,10 @@ func (r *peopleRegistry) update(stableKey string, update func(*storage.PersonEnt
 	}
 }
 
-func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *emby.Client, exportDir string, people *peopleRegistry, concurrency int) error {
+func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *emby.Client, exportDir string, people *peopleRegistry, concurrency int) ([]storage.ErrorEntry, error) {
 	tasks := people.imageTasks()
 	if len(tasks) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	taskCh := make(chan exportPersonImageTask)
@@ -1427,17 +1535,19 @@ func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *em
 	skipped := 0
 	failed := 0
 	detailedFailures := 0
+	failures := make([]storage.ErrorEntry, 0)
 	ticker := time.NewTicker(exportHeartbeatInterval)
 	defer ticker.Stop()
 	for done < len(tasks) {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return failures, ctx.Err()
 		case result := <-resultCh:
 			done++
 			switch {
 			case result.Err != nil:
 				failed++
+				failures = append(failures, storage.ErrorEntry{Scope: "person-image", Name: result.Name, Message: result.Err.Error()})
 				detailedFailures++
 				if detailedFailures <= 10 {
 					j.Log("warn", "人物头像导出失败：%s - %v", result.Name, result.Err)
@@ -1459,7 +1569,7 @@ func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *em
 		}
 	}
 	j.Log("info", "人物头像导出完成：成功 %d，跳过 %d，失败 %d", exported, skipped, failed)
-	return nil
+	return failures, nil
 }
 
 func (s *Service) exportPersonImage(ctx context.Context, client *emby.Client, exportDir string, people *peopleRegistry, task exportPersonImageTask) exportPersonImageResult {
@@ -1478,6 +1588,9 @@ func (s *Service) exportPersonImage(ctx context.Context, client *emby.Client, ex
 	if err != nil || len(data) == 0 {
 		if ctx.Err() != nil {
 			return exportPersonImageResult{Name: task.Name, Err: ctx.Err()}
+		}
+		if err != nil && !strings.Contains(err.Error(), "HTTP 404") {
+			return exportPersonImageResult{Name: task.Name, Err: err}
 		}
 		return exportPersonImageResult{Name: task.Name, Skipped: true}
 	}
@@ -1509,8 +1622,8 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	for i := 0; i < workers; i++ {
 		go func() {
 			for task := range taskCh {
-				entry, err := s.exportItem(ctx, client, exportDir, lib, task.Item, task.Slug, imageTypeSet, req, people, baselineItems)
-				resultCh <- exportItemResult{Index: task.Index, Item: task.Item, Entry: entry, Err: err}
+				entry, imageErrors, err := s.exportItem(ctx, client, exportDir, lib, task.Item, task.Slug, imageTypeSet, req, people, baselineItems)
+				resultCh <- exportItemResult{Index: task.Index, Item: task.Item, Entry: entry, Errors: imageErrors, Err: err}
 			}
 		}()
 	}
@@ -1551,10 +1664,10 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	return results, nil
 }
 
-func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, baselineItems map[string]storage.ItemEntry) (storage.ItemEntry, error) {
+func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, baselineItems map[string]storage.ItemEntry) (storage.ItemEntry, []storage.ErrorEntry, error) {
 	enriched, err := s.enrichExportItem(ctx, client, item, req.IncludeMediaInfo)
 	if err != nil {
-		return storage.ItemEntry{}, err
+		return storage.ItemEntry{}, nil, err
 	}
 	item = enriched
 	if !req.IncludeMediaInfo {
@@ -1592,14 +1705,17 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		if baseline, ok := baselineItems[stableKey]; ok && baseline.Fingerprint != "" && baseline.Fingerprint == fingerprint {
 			entry.Skipped = true
 			entry.SkipReason = "unchanged"
-			return entry, nil
+			return entry, nil, nil
 		}
 	}
 
+	imageErrors := make([]storage.ErrorEntry, 0)
 	if !req.SkipImages {
 		images, err := client.Images(ctx, item.ID)
+		authoritativeImages := err == nil && len(images) > 0
 		if err != nil || len(images) == 0 {
 			images = emby.FallbackImages(item)
+			authoritativeImages = len(images) > 0
 			if len(images) == 0 {
 				images = emby.DirectImageInfos(item.ID, imageTypesForDirectFallback(req.ImageTypes))
 			}
@@ -1610,12 +1726,19 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 			}
 			data, ext, err := client.DownloadPath(ctx, image.DownloadPath)
 			if err != nil || len(data) == 0 {
+				if authoritativeImages {
+					if err == nil {
+						err = fmt.Errorf("empty image response")
+					}
+					imageErrors = append(imageErrors, storage.ErrorEntry{Scope: "item-image", ID: item.ID, Name: item.Name, Message: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, err)})
+				}
 				continue
 			}
 			fileName := imageFileName(image, ext)
 			rel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, fileName))
 			file, err := storage.WriteBytes(filepath.Join(exportDir, rel), data)
 			if err != nil {
+				imageErrors = append(imageErrors, storage.ErrorEntry{Scope: "item-image", ID: item.ID, Name: item.Name, Message: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, err)})
 				continue
 			}
 			file.Type = image.ImageType
@@ -1635,12 +1758,12 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 	}
 
 	if err := storage.WriteJSON(filepath.Join(itemDir, "info.json"), info); err != nil {
-		return entry, err
+		return entry, imageErrors, err
 	}
 	if err := storage.WriteJSON(filepath.Join(itemDir, "raw.json"), item.Raw); err != nil {
-		return entry, err
+		return entry, imageErrors, err
 	}
-	return entry, nil
+	return entry, imageErrors, nil
 }
 
 func (s *Service) enrichExportItem(ctx context.Context, client *emby.Client, item emby.Item, includeMediaInfo bool) (emby.Item, error) {

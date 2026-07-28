@@ -16,13 +16,21 @@ import (
 	"emby-migrator/internal/storage"
 )
 
-const mediaDatabasePlanSchemaVersion = 1
+const mediaDatabasePlanSchemaVersion = 2
+
+type MediaDatabaseBinding struct {
+	TargetServerID string `json:"targetServerId"`
+	SchemaIdentity string `json:"schemaIdentity"`
+	AnchorCount    int    `json:"anchorCount"`
+	AnchorDigest   string `json:"anchorDigest"`
+}
 
 type MediaDatabasePlan struct {
 	SchemaVersion     int                     `json:"schemaVersion"`
 	SourceEmbyVersion string                  `json:"sourceEmbyVersion"`
 	TargetEmbyVersion string                  `json:"targetEmbyVersion"`
 	Target            ImportTarget            `json:"target"`
+	DatabaseBinding   MediaDatabaseBinding    `json:"databaseBinding,omitempty"`
 	CreatedAt         time.Time               `json:"createdAt"`
 	Items             []MediaDatabasePlanItem `json:"items"`
 }
@@ -52,6 +60,12 @@ type MediaDatabaseVerifyResult struct {
 	Items    int `json:"items"`
 	Streams  int `json:"streams"`
 	Chapters int `json:"chapters"`
+}
+
+type MediaDatabaseTargetPreflight struct {
+	PlanPath      string       `json:"planPath"`
+	PlannedTarget ImportTarget `json:"plannedTarget"`
+	ActualTarget  ImportTarget `json:"actualTarget"`
 }
 
 func packageMediaInfoPayload(exportPath string, entry storage.ItemEntry) map[string]any {
@@ -109,6 +123,11 @@ func writeMediaDatabasePlan(exportPath string, manifest storage.Manifest, report
 	if len(plan.Items) == 0 {
 		return nil, nil
 	}
+	binding, err := buildMediaDatabaseBinding(plan.Target.ServerID, plan.Items)
+	if err != nil {
+		return nil, fmt.Errorf("build media database target binding: %w", err)
+	}
+	plan.DatabaseBinding = binding
 
 	targetKey := firstNonEmpty(report.Target.ServerID, report.Target.ServerName, report.Target.Version)
 	fileName := "media-db-plan-" + storage.SafeName(targetKey) + ".json"
@@ -127,21 +146,35 @@ func cloneAnyMap(source map[string]any) map[string]any {
 	return out
 }
 
+func buildMediaDatabaseBinding(serverID string, items []MediaDatabasePlanItem) (MediaDatabaseBinding, error) {
+	serverID = strings.TrimSpace(serverID)
+	if serverID == "" {
+		return MediaDatabaseBinding{}, fmt.Errorf("target Emby server id is missing")
+	}
+	anchors := make([]embydb.TargetAnchor, 0, len(items))
+	for _, item := range items {
+		itemID, err := strconv.ParseInt(strings.TrimSpace(item.TargetItemID), 10, 64)
+		if err != nil || itemID <= 0 {
+			return MediaDatabaseBinding{}, fmt.Errorf("invalid target item id %q for %s", item.TargetItemID, item.SourceName)
+		}
+		anchors = append(anchors, embydb.TargetAnchor{ItemID: itemID, Name: item.TargetName})
+	}
+	digest, err := embydb.BuildTargetBindingDigest(serverID, anchors)
+	if err != nil {
+		return MediaDatabaseBinding{}, err
+	}
+	return MediaDatabaseBinding{
+		TargetServerID: serverID,
+		SchemaIdentity: embydb.MediaSchemaIdentity,
+		AnchorCount:    len(anchors),
+		AnchorDigest:   digest,
+	}, nil
+}
+
 func (s *Service) ApplyMediaDatabasePlan(ctx context.Context, j *job.Job, request MediaDatabaseApplyRequest) (MediaDatabaseApplyResult, error) {
-	exportPath, _, err := s.ResolveExportPath(request.ExportPath)
+	exportPath, planPath, plan, err := s.loadMediaDatabasePlan(request.ExportPath)
 	if err != nil {
 		return MediaDatabaseApplyResult{}, err
-	}
-	planPath, err := latestMediaDatabasePlanPath(exportPath)
-	if err != nil {
-		return MediaDatabaseApplyResult{}, err
-	}
-	var plan MediaDatabasePlan
-	if err := storage.ReadJSON(planPath, &plan); err != nil {
-		return MediaDatabaseApplyResult{}, fmt.Errorf("read media database plan: %w", err)
-	}
-	if plan.SchemaVersion != mediaDatabasePlanSchemaVersion {
-		return MediaDatabaseApplyResult{}, fmt.Errorf("unsupported media database plan schema %d", plan.SchemaVersion)
 	}
 	patches := make([]embydb.ItemPatch, 0, len(plan.Items))
 	for _, item := range plan.Items {
@@ -158,14 +191,22 @@ func (s *Service) ApplyMediaDatabasePlan(ctx context.Context, j *job.Job, reques
 			Chapters:     item.Chapters,
 		})
 	}
+	binding, err := validateMediaDatabasePlanBinding(plan)
+	if err != nil {
+		return MediaDatabaseApplyResult{}, err
+	}
 	j.Log("info", "开始应用媒体技术信息数据库计划：%s，共 %d 个项目", planPath, len(patches))
 	j.Log("info", "目标数据库：%s；源 Emby %s，目标 Emby %s", request.DatabasePath, plan.SourceEmbyVersion, plan.TargetEmbyVersion)
 	result, err := embydb.Apply(ctx, embydb.ApplyOptions{
-		DatabasePath:  request.DatabasePath,
-		SourceVersion: plan.SourceEmbyVersion,
-		TargetVersion: plan.TargetEmbyVersion,
-		Items:         patches,
-		Overwrite:     request.Overwrite,
+		DatabasePath:           request.DatabasePath,
+		SourceVersion:          plan.SourceEmbyVersion,
+		TargetVersion:          plan.TargetEmbyVersion,
+		TargetServerID:         binding.TargetServerID,
+		TargetBindingDigest:    binding.AnchorDigest,
+		TargetAnchorCount:      binding.AnchorCount,
+		ExpectedSchemaIdentity: binding.SchemaIdentity,
+		Items:                  patches,
+		Overwrite:              request.Overwrite,
 	})
 	if err != nil {
 		return MediaDatabaseApplyResult{}, err
@@ -178,6 +219,116 @@ func (s *Service) ApplyMediaDatabasePlan(ctx context.Context, j *job.Job, reques
 		return MediaDatabaseApplyResult{}, fmt.Errorf("write media database apply report: %w", err)
 	}
 	return applyResult, nil
+}
+
+func (s *Service) PreflightMediaDatabaseTarget(ctx context.Context, exportName string, connection emby.Connection) (MediaDatabaseTargetPreflight, error) {
+	_, planPath, plan, err := s.loadMediaDatabasePlan(exportName)
+	if err != nil {
+		return MediaDatabaseTargetPreflight{}, err
+	}
+	if _, err := validateMediaDatabasePlanBinding(plan); err != nil {
+		return MediaDatabaseTargetPreflight{}, err
+	}
+	plannedID := strings.TrimSpace(plan.Target.ServerID)
+	if plannedID == "" {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("media database plan does not contain a target Emby ServerID; online identity cannot be verified")
+	}
+	plannedVersion := strings.TrimSpace(plan.TargetEmbyVersion)
+	if plannedVersion == "" {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("media database plan does not contain a target Emby version")
+	}
+	if targetVersion := strings.TrimSpace(plan.Target.Version); targetVersion != "" && !sameEmbyMinorSeries(plannedVersion, targetVersion) {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("media database plan target version is inconsistent: target %q, database plan %q", targetVersion, plannedVersion)
+	}
+
+	client, err := emby.NewClient(connection.BaseURL, connection.APIKey)
+	if err != nil {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("connect to target Emby for identity preflight: %w", err)
+	}
+	info, err := client.SystemInfo(ctx)
+	if err != nil {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("read target Emby SystemInfo for identity preflight: %w", err)
+	}
+	actualID := strings.TrimSpace(info.ID)
+	actualVersion := strings.TrimSpace(info.Version)
+	if actualID == "" {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("target Emby SystemInfo did not return a ServerID")
+	}
+	if actualID != plannedID {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("target Emby ServerID mismatch: plan %q, actual %q", plannedID, actualID)
+	}
+	if !sameEmbyMinorSeries(plannedVersion, actualVersion) {
+		return MediaDatabaseTargetPreflight{}, fmt.Errorf("target Emby version series mismatch: plan %q, actual %q", plannedVersion, actualVersion)
+	}
+	return MediaDatabaseTargetPreflight{
+		PlanPath: planPath,
+		PlannedTarget: ImportTarget{
+			ServerID: plannedID, ServerName: strings.TrimSpace(plan.Target.ServerName), Version: plannedVersion,
+		},
+		ActualTarget: ImportTarget{
+			ServerID: actualID, ServerName: strings.TrimSpace(info.ServerName), Version: actualVersion,
+		},
+	}, nil
+}
+
+func (s *Service) loadMediaDatabasePlan(exportName string) (string, string, MediaDatabasePlan, error) {
+	exportPath, _, err := s.ResolveExportPath(exportName)
+	if err != nil {
+		return "", "", MediaDatabasePlan{}, err
+	}
+	planPath, err := latestMediaDatabasePlanPath(exportPath)
+	if err != nil {
+		return "", "", MediaDatabasePlan{}, err
+	}
+	var plan MediaDatabasePlan
+	if err := storage.ReadJSON(planPath, &plan); err != nil {
+		return "", "", MediaDatabasePlan{}, fmt.Errorf("read media database plan: %w", err)
+	}
+	if plan.SchemaVersion != 1 && plan.SchemaVersion != mediaDatabasePlanSchemaVersion {
+		return "", "", MediaDatabasePlan{}, fmt.Errorf("unsupported media database plan schema %d", plan.SchemaVersion)
+	}
+	return exportPath, planPath, plan, nil
+}
+
+func validateMediaDatabasePlanBinding(plan MediaDatabasePlan) (MediaDatabaseBinding, error) {
+	binding := plan.DatabaseBinding
+	if plan.SchemaVersion == mediaDatabasePlanSchemaVersion {
+		rebuilt, err := buildMediaDatabaseBinding(plan.Target.ServerID, plan.Items)
+		if err != nil {
+			return MediaDatabaseBinding{}, fmt.Errorf("validate media database target binding: %w", err)
+		}
+		if binding.TargetServerID != rebuilt.TargetServerID || binding.SchemaIdentity != rebuilt.SchemaIdentity ||
+			binding.AnchorCount != rebuilt.AnchorCount || !strings.EqualFold(binding.AnchorDigest, rebuilt.AnchorDigest) {
+			return MediaDatabaseBinding{}, fmt.Errorf("media database target binding is missing or does not match the plan contents")
+		}
+		return binding, nil
+	}
+	// Schema 1 plans predate explicit ServerID binding. They remain readable, but every target item is still
+	// content-bound and checked against the selected database before backup or mutation.
+	legacy, err := buildLegacyMediaDatabaseBinding(plan.Target.ServerID, plan.Items)
+	if err != nil {
+		return MediaDatabaseBinding{}, fmt.Errorf("build legacy media database target binding: %w", err)
+	}
+	return legacy, nil
+}
+
+func buildLegacyMediaDatabaseBinding(serverID string, items []MediaDatabasePlanItem) (MediaDatabaseBinding, error) {
+	anchors := make([]embydb.TargetAnchor, 0, len(items))
+	for _, item := range items {
+		itemID, err := strconv.ParseInt(strings.TrimSpace(item.TargetItemID), 10, 64)
+		if err != nil || itemID <= 0 {
+			return MediaDatabaseBinding{}, fmt.Errorf("invalid target item id %q for %s", item.TargetItemID, item.SourceName)
+		}
+		anchors = append(anchors, embydb.TargetAnchor{ItemID: itemID, Name: item.TargetName})
+	}
+	digest, err := embydb.BuildTargetBindingDigest(strings.TrimSpace(serverID), anchors)
+	if err != nil {
+		return MediaDatabaseBinding{}, err
+	}
+	return MediaDatabaseBinding{
+		TargetServerID: strings.TrimSpace(serverID), SchemaIdentity: embydb.MediaSchemaIdentity,
+		AnchorCount: len(anchors), AnchorDigest: digest,
+	}, nil
 }
 
 func (s *Service) VerifyMediaDatabasePlan(ctx context.Context, exportName string, connection emby.Connection) (MediaDatabaseVerifyResult, error) {

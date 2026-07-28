@@ -28,16 +28,23 @@ type ItemPatch struct {
 }
 
 type ApplyOptions struct {
-	DatabasePath  string
-	SourceVersion string
-	TargetVersion string
-	Items         []ItemPatch
-	Overwrite     bool
-	Now           func() time.Time
+	DatabasePath           string
+	SourceVersion          string
+	TargetVersion          string
+	TargetServerID         string
+	TargetBindingDigest    string
+	TargetAnchorCount      int
+	ExpectedSchemaIdentity string
+	Items                  []ItemPatch
+	Overwrite              bool
+	Now                    func() time.Time
 }
 
 type ApplyResult struct {
 	DatabasePath         string `json:"databasePath"`
+	TargetServerID       string `json:"targetServerId,omitempty"`
+	TargetBindingDigest  string `json:"targetBindingDigest,omitempty"`
+	SchemaIdentity       string `json:"schemaIdentity,omitempty"`
 	BackupPath           string `json:"backupPath"`
 	BackupsPruned        int    `json:"backupsPruned,omitempty"`
 	BackupCleanupWarning string `json:"backupCleanupWarning,omitempty"`
@@ -81,7 +88,30 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return ApplyResult{}, fmt.Errorf("target Emby database is locked; stop Emby before applying media information: %w", err)
 	}
-	if err := validateSchema(ctx, conn); err != nil {
+	schemaIdentity, err := validateSchema(ctx, conn)
+	if err != nil {
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		return ApplyResult{}, err
+	}
+	if expected := strings.TrimSpace(options.ExpectedSchemaIdentity); expected != "" && expected != schemaIdentity {
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		return ApplyResult{}, fmt.Errorf("target Emby database schema identity mismatch: plan %q, database %q", expected, schemaIdentity)
+	}
+	expectedDigest := strings.TrimSpace(options.TargetBindingDigest)
+	expectedCount := options.TargetAnchorCount
+	if expectedDigest == "" {
+		anchors := make([]TargetAnchor, 0, len(options.Items))
+		for _, item := range options.Items {
+			anchors = append(anchors, TargetAnchor{ItemID: item.TargetItemID, Name: item.TargetName})
+		}
+		expectedDigest, err = BuildTargetBindingDigest(options.TargetServerID, anchors)
+		if err != nil {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+			return ApplyResult{}, err
+		}
+		expectedCount = len(anchors)
+	}
+	if err := validateTargetBinding(ctx, conn, options.TargetServerID, expectedDigest, expectedCount, options.Items); err != nil {
 		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		return ApplyResult{}, err
 	}
@@ -97,7 +127,10 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 	if err := backupDatabase(conn, backupPath, info.Mode().Perm()); err != nil {
 		return ApplyResult{}, fmt.Errorf("backup Emby database: %w", err)
 	}
-	result := ApplyResult{DatabasePath: databasePath, BackupPath: backupPath}
+	result := ApplyResult{
+		DatabasePath: databasePath, BackupPath: backupPath, TargetServerID: strings.TrimSpace(options.TargetServerID),
+		TargetBindingDigest: expectedDigest, SchemaIdentity: schemaIdentity,
+	}
 	result.BackupsPruned, err = cleanupDatabaseBackups(databasePath, backupPath, 5, os.Remove)
 	if err != nil {
 		result.BackupCleanupWarning = err.Error()
@@ -158,39 +191,6 @@ func supportedSeries(version string) string {
 		return series
 	}
 	return ""
-}
-
-func validateSchema(ctx context.Context, conn *sql.Conn) error {
-	required := map[string][]string{
-		"MediaItems":    {"Id", "Name", "RunTimeTicks", "TotalBitrate", "Width", "Height", "Size", "Container"},
-		"MediaStreams2": {"ItemId", "StreamIndex", "StreamType", "Codec", "Height", "Width"},
-		"Chapters3":     {"ItemId", "ChapterIndex", "StartPositionTicks", "Name", "MarkerType"},
-	}
-	for table, columns := range required {
-		rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+table+")")
-		if err != nil {
-			return fmt.Errorf("inspect %s schema: %w", table, err)
-		}
-		found := map[string]bool{}
-		for rows.Next() {
-			var cid int
-			var name, typ string
-			var notNull, primaryKey int
-			var defaultValue any
-			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
-				rows.Close()
-				return fmt.Errorf("inspect %s schema: %w", table, err)
-			}
-			found[strings.ToLower(name)] = true
-		}
-		rows.Close()
-		for _, column := range columns {
-			if !found[strings.ToLower(column)] {
-				return fmt.Errorf("unsupported Emby database schema: %s.%s is missing", table, column)
-			}
-		}
-	}
-	return nil
 }
 
 func applyItem(ctx context.Context, conn *sql.Conn, item ItemPatch, overwrite bool) (bool, int, int, error) {

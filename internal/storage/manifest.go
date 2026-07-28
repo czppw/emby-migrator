@@ -77,6 +77,7 @@ type Manifest struct {
 	ToolVersion   string         `json:"toolVersion"`
 	EmbyVersion   string         `json:"embyVersion,omitempty"`
 	ExportedAt    time.Time      `json:"exportedAt"`
+	ExportOptions *ExportOptions `json:"exportOptions,omitempty"`
 	Libraries     []LibraryEntry `json:"libraries"`
 	Items         []ItemEntry    `json:"items"`
 	People        []PersonEntry  `json:"people"`
@@ -86,6 +87,13 @@ type Manifest struct {
 	Incremental   *Incremental   `json:"incremental,omitempty"`
 	SchemaVersion int            `json:"schemaVersion"`
 	Compatibility string         `json:"compatibility"`
+}
+
+type ExportOptions struct {
+	SkipImages          bool     `json:"skipImages"`
+	ImageTypes          []string `json:"imageTypes,omitempty"`
+	IncludePeopleImages bool     `json:"includePeopleImages"`
+	IncludeMediaInfo    bool     `json:"includeMediaInfo"`
 }
 
 type Incremental struct {

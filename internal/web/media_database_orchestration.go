@@ -113,6 +113,7 @@ func (s *Server) applyMediaDatabaseJob(j *job.Job, exportPath, databasePath stri
 		ContainerName: containerName,
 	}
 	if !profile.AutoManageContainer {
+		j.Log("warn", "手动停服模式：跳过在线目标身份预检；写入前仅校验 library.db schema 和计划项目 ID/名称锚点，无法独立确认数据库所属 ServerID。")
 		result.MediaDatabaseApplyResult, err = apply()
 		return result, err
 	}
@@ -122,6 +123,16 @@ func (s *Server) applyMediaDatabaseJob(j *job.Job, exportPath, databasePath stri
 	if hostname, hostErr := os.Hostname(); hostErr == nil && strings.EqualFold(strings.TrimSpace(hostname), containerName) {
 		return result, fmt.Errorf("拒绝停止 Emby Migrator 自身容器")
 	}
+	preflightCtx, cancel := context.WithTimeout(j.Context(), 15*time.Second)
+	preflight, err := s.exporter.PreflightMediaDatabaseTarget(preflightCtx, exportPath, emby.Connection{
+		BaseURL: profile.BaseURL,
+		APIKey:  profile.APIKey,
+	})
+	cancel()
+	if err != nil {
+		return result, fmt.Errorf("目标 Emby 在线身份预检失败，未停止容器且未写入数据库：%w", err)
+	}
+	j.Log("info", "目标 Emby 在线身份预检通过：ServerID %s，版本 %s，计划 %s", preflight.ActualTarget.ServerID, preflight.ActualTarget.Version, preflight.PlanPath)
 	if err := s.docker.Ping(j.Context()); err != nil {
 		return result, fmt.Errorf("无法连接 Docker Engine，请挂载 /var/run/docker.sock：%w", err)
 	}

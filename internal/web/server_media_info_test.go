@@ -10,16 +10,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"emby-migrator/internal/config"
 	"emby-migrator/internal/dockerengine"
+	"emby-migrator/internal/embydb"
 	"emby-migrator/internal/exporter"
 	"emby-migrator/internal/job"
 	"emby-migrator/internal/storage"
 )
 
-func TestAutomaticContainerManagementRestartsAfterApplyFailure(t *testing.T) {
+func TestAutomaticContainerManagementRejectsMissingPlanBeforeStop(t *testing.T) {
 	dataDir := t.TempDir()
 	manager := job.NewManager()
 	server := NewServer(config.Config{DataDir: dataDir}, manager, exporter.NewService(dataDir))
@@ -36,8 +38,8 @@ func TestAutomaticContainerManagementRestartsAfterApplyFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("missing export should make the apply fail")
 	}
-	if docker.stopCalls != 1 || docker.startCalls != 1 {
-		t.Fatalf("container calls after apply failure: stop=%d start=%d", docker.stopCalls, docker.startCalls)
+	if docker.stopCalls != 0 || docker.startCalls != 0 {
+		t.Fatalf("preflight failure must not touch the container: stop=%d start=%d", docker.stopCalls, docker.startCalls)
 	}
 	if !docker.running {
 		t.Fatal("container should be running after failure recovery")
@@ -47,13 +49,17 @@ func TestAutomaticContainerManagementRestartsAfterApplyFailure(t *testing.T) {
 func TestAutomaticContainerManagementRestartsWhenStopReturnsError(t *testing.T) {
 	dataDir := t.TempDir()
 	manager := job.NewManager()
-	server := NewServer(config.Config{DataDir: dataDir}, manager, exporter.NewService(dataDir))
+	service := exporter.NewService(dataDir)
+	writeWebMediaDatabasePreflightPlan(t, service, "fixture", "target-server", "4.9.5.0")
+	mock := newWebSystemInfoServer(t, "target-server", "4.9.5.0")
+	defer mock.Close()
+	server := NewServer(config.Config{DataDir: dataDir}, manager, service)
 	docker := &recordingDockerController{running: true, stopErr: errors.New("connection interrupted after stop")}
 	server.docker = docker
 	j := manager.Create("media-db-apply")
 
-	_, err := server.applyMediaDatabaseJob(j, "unused", filepath.Join(t.TempDir(), "library.db"), false, appServerProfileSettings{
-		BaseURL:             "http://127.0.0.1:8096",
+	_, err := server.applyMediaDatabaseJob(j, "fixture", filepath.Join(t.TempDir(), "library.db"), false, appServerProfileSettings{
+		BaseURL:             mock.URL,
 		APIKey:              "test-key",
 		ContainerName:       "emby",
 		AutoManageContainer: true,
@@ -64,6 +70,106 @@ func TestAutomaticContainerManagementRestartsWhenStopReturnsError(t *testing.T) 
 	if docker.stopCalls != 1 || docker.startCalls != 1 || !docker.running {
 		t.Fatalf("container was not recovered after ambiguous stop: %#v", docker)
 	}
+}
+
+func TestAutomaticContainerManagementRejectsWrongOnlineTargetBeforeStop(t *testing.T) {
+	tests := []struct {
+		name          string
+		actualID      string
+		actualVersion string
+		wantError     string
+	}{
+		{name: "server id mismatch", actualID: "other-server", actualVersion: "4.9.5.0", wantError: "ServerID mismatch"},
+		{name: "version mismatch", actualID: "target-server", actualVersion: "4.8.11.0", wantError: "version series mismatch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			manager := job.NewManager()
+			service := exporter.NewService(dataDir)
+			writeWebMediaDatabasePreflightPlan(t, service, "fixture", "target-server", "4.9.5.0")
+			mock := newWebSystemInfoServer(t, tt.actualID, tt.actualVersion)
+			defer mock.Close()
+			server := NewServer(config.Config{DataDir: dataDir}, manager, service)
+			docker := &recordingDockerController{running: true}
+			server.docker = docker
+			j := manager.Create("media-db-apply")
+			databasePath := filepath.Join(t.TempDir(), "library.db")
+			if err := os.WriteFile(databasePath, []byte("must remain untouched"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := server.applyMediaDatabaseJob(j, "fixture", databasePath, false, appServerProfileSettings{
+				BaseURL: mock.URL, APIKey: "test-key", ContainerName: "emby", AutoManageContainer: true,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("applyMediaDatabaseJob error = %v, want %q", err, tt.wantError)
+			}
+			if docker.stopCalls != 0 || docker.startCalls != 0 {
+				t.Fatalf("identity preflight failure touched container: %#v", docker)
+			}
+			backups, globErr := filepath.Glob(databasePath + ".emby-migrator-*.bak")
+			if globErr != nil {
+				t.Fatal(globErr)
+			}
+			if len(backups) != 0 {
+				t.Fatalf("identity preflight failure created database backups: %v", backups)
+			}
+		})
+	}
+}
+
+func TestManualContainerModeLogsOfflineIdentityLimitation(t *testing.T) {
+	dataDir := t.TempDir()
+	manager := job.NewManager()
+	server := NewServer(config.Config{DataDir: dataDir}, manager, exporter.NewService(dataDir))
+	j := manager.Create("media-db-apply")
+	_, err := server.applyMediaDatabaseJob(j, "missing-export", filepath.Join(t.TempDir(), "library.db"), false, appServerProfileSettings{})
+	if err == nil {
+		t.Fatal("missing export should fail")
+	}
+	logs := j.Logs()
+	if len(logs) == 0 || !strings.Contains(logs[0].Message, "仅校验 library.db schema") || !strings.Contains(logs[0].Message, "无法独立确认") {
+		t.Fatalf("manual mode did not log its identity limitation: %#v", logs)
+	}
+}
+
+func writeWebMediaDatabasePreflightPlan(t *testing.T, service *exporter.Service, exportName, serverID, version string) {
+	t.Helper()
+	exportDir := filepath.Join(service.ExportsDir(), exportName)
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), storage.Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	items := []exporter.MediaDatabasePlanItem{{TargetItemID: "200", TargetName: "Movie", SourceName: "Movie"}}
+	digest, err := embydb.BuildTargetBindingDigest(serverID, []embydb.TargetAnchor{{ItemID: 200, Name: "Movie"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := exporter.MediaDatabasePlan{
+		SchemaVersion: 2, TargetEmbyVersion: version,
+		Target: exporter.ImportTarget{ServerID: serverID, ServerName: "Target", Version: version},
+		DatabaseBinding: exporter.MediaDatabaseBinding{
+			TargetServerID: serverID, SchemaIdentity: embydb.MediaSchemaIdentity, AnchorCount: 1, AnchorDigest: digest,
+		},
+		Items: items,
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "media-db-plan-fixture.json"), plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newWebSystemInfoServer(t *testing.T, serverID, version string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/System/Info" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": serverID, "Version": version, "ServerName": "Target"})
+	}))
 }
 
 type recordingDockerController struct {

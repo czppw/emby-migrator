@@ -141,6 +141,103 @@ func TestApplyAcceptsPortableTargetName(t *testing.T) {
 	}
 }
 
+func TestApplyVerifiesTargetBindingBeforeBackup(t *testing.T) {
+	path := createFixtureDatabase(t)
+	_, err := Apply(context.Background(), ApplyOptions{
+		DatabasePath:           path,
+		SourceVersion:          "4.9.5.0",
+		TargetVersion:          "4.9.5.0",
+		TargetServerID:         "target-server",
+		TargetBindingDigest:    strings.Repeat("0", 64),
+		TargetAnchorCount:      1,
+		ExpectedSchemaIdentity: MediaSchemaIdentity,
+		Items:                  []ItemPatch{fixturePatch()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "binding mismatch") {
+		t.Fatalf("wrong target binding should be rejected: %v", err)
+	}
+	backups, globErr := filepath.Glob(path + ".emby-migrator-*.bak")
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("binding failure must happen before backup, got %v", backups)
+	}
+}
+
+func TestApplyReportsVerifiedSchemaAndTargetIdentity(t *testing.T) {
+	path := createFixtureDatabase(t)
+	patch := fixturePatch()
+	digest, err := BuildTargetBindingDigest("target-server", []TargetAnchor{{ItemID: patch.TargetItemID, Name: patch.TargetName}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(context.Background(), ApplyOptions{
+		DatabasePath:           path,
+		SourceVersion:          "4.8.11.0",
+		TargetVersion:          "4.8.11.0",
+		TargetServerID:         "target-server",
+		TargetBindingDigest:    digest,
+		TargetAnchorCount:      1,
+		ExpectedSchemaIdentity: MediaSchemaIdentity,
+		Items:                  []ItemPatch{patch},
+	})
+	if err != nil {
+		t.Fatalf("same-series apply failed: %v", err)
+	}
+	if result.TargetServerID != "target-server" || result.TargetBindingDigest != digest || result.SchemaIdentity != MediaSchemaIdentity {
+		t.Fatalf("verified identity was not reported: %#v", result)
+	}
+}
+
+func TestApplyRejectsUnknownSchemaIdentityBeforeBackup(t *testing.T) {
+	path := createFixtureDatabase(t)
+	_, err := Apply(context.Background(), ApplyOptions{
+		DatabasePath: path, SourceVersion: "4.9.5.0", TargetVersion: "4.9.5.0",
+		ExpectedSchemaIdentity: "unknown-schema", Items: []ItemPatch{fixturePatch()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "schema identity mismatch") {
+		t.Fatalf("unknown schema identity should be rejected: %v", err)
+	}
+	backups, globErr := filepath.Glob(path + ".emby-migrator-*.bak")
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("schema identity failure must happen before backup, got %v", backups)
+	}
+}
+
+func TestBuildTargetBindingDigestIsStableAndServerSpecific(t *testing.T) {
+	forward, err := BuildTargetBindingDigest("server-a", []TargetAnchor{
+		{ItemID: 2, Name: "Second.Movie"},
+		{ItemID: 1, Name: "First Movie"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversed, err := BuildTargetBindingDigest("server-a", []TargetAnchor{
+		{ItemID: 1, Name: "first-movie"},
+		{ItemID: 2, Name: "second movie"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherServer, err := BuildTargetBindingDigest("server-b", []TargetAnchor{
+		{ItemID: 1, Name: "First Movie"},
+		{ItemID: 2, Name: "Second Movie"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forward != reversed {
+		t.Fatalf("binding digest should ignore item order and portable punctuation: %q != %q", forward, reversed)
+	}
+	if forward == otherServer {
+		t.Fatal("binding digest must include the target server id")
+	}
+}
+
 func TestApplyPrunesOldMigratorBackups(t *testing.T) {
 	path := createFixtureDatabase(t)
 	oldBackups := make([]string, 0, 6)
