@@ -126,7 +126,7 @@ docker run -d \
   -v /opt/emby-migrator/data:/data \
   -v /opt/emby-migrator/config:/config \
   -v /opt/emby-migrator/imports:/imports \
-  czppwa/emby-migrator:v1.1.5
+  czppwa/emby-migrator:v1.1.6
 ```
 
 打开：
@@ -189,7 +189,7 @@ http://服务器IP:8787
 ```yaml
 services:
   emby-migrator:
-    image: czppwa/emby-migrator:v1.1.5
+    image: czppwa/emby-migrator:v1.1.6
     container_name: emby-migrator
     network_mode: host
     environment:
@@ -237,7 +237,7 @@ Emby Migrator 是按需迁移和备份恢复工具，不是常驻双向同步器
 
 - GitHub：<https://github.com/czppw/emby-migrator>
 - Docker Hub：<https://hub.docker.com/r/czppwa/emby-migrator>
-- 当前版本：`v1.1.5`
+- 当前版本：`v1.1.6`
 - 开源协议：AGPL-3.0-or-later
 
 ## 许可证

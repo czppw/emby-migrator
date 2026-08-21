@@ -126,7 +126,7 @@ docker run -d \
   -v /opt/emby-migrator/data:/data \
   -v /opt/emby-migrator/config:/config \
   -v /opt/emby-migrator/imports:/imports \
-  czppwa/emby-migrator:v1.1.5
+  czppwa/emby-migrator:v1.1.6
 ```
 
 Open:
@@ -189,7 +189,7 @@ The UI discovers the target `library.db`. When automatic stop/start is enabled, 
 ```yaml
 services:
   emby-migrator:
-    image: czppwa/emby-migrator:v1.1.5
+    image: czppwa/emby-migrator:v1.1.6
     container_name: emby-migrator
     network_mode: host
     environment:
@@ -237,7 +237,7 @@ Emby Migrator is an on-demand migration and backup/restore tool, not a permanent
 
 - GitHub: <https://github.com/czppw/emby-migrator>
 - Docker Hub: <https://hub.docker.com/r/czppwa/emby-migrator>
-- Current version: `v1.1.5`
+- Current version: `v1.1.6`
 - License: AGPL-3.0-or-later
 
 ## License
