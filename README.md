@@ -77,6 +77,8 @@ Emby Migrator 将迁移拆成两个阶段：
 
 普通元数据、图片和人物信息通过 Emby API 迁移，可跨版本使用。媒体技术信息需要停服写入目标 `library.db`，仅支持已验证的同系列版本；跨版本会明确拒绝，不会强行写入。
 
+默认支持 `4.8.11.x` 和 `4.9.5.x` 两个系列。如果你确认某个额外系列共享同一套 `library.db` schema，可以用 `EMBY_MIGRATOR_DB_VERSIONS`（逗号分隔，如 `4.8.11,4.9.5,4.9.6`）声明更多兼容系列。
+
 ## 推荐迁移流程
 
 ### 旧服务器
@@ -183,6 +185,7 @@ http://服务器IP:8787
 - 写库前会创建 SQLite 备份，使用事务并执行完整性检查。
 - 数据库路径被限制在 `EMBY_MIGRATOR_EMBY_DB_ROOT` 范围内。
 - 可以使用 `EMBY_MIGRATOR_SESSION_SECRET` 固定登录 Cookie 签名密钥。
+- 只有在实例确实位于反向代理之后时，才设置 `EMBY_MIGRATOR_TRUST_PROXY=1` 采信 `X-Forwarded-Proto` / `X-Forwarded-For`；否则客户端可伪造这些头。
 
 ## Docker Compose
 

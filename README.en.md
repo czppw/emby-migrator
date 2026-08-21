@@ -77,6 +77,8 @@ Restore metadata, artwork, people images, and compatible media information
 
 Regular metadata, artwork, and people information use the Emby API and can be migrated across versions. Media information requires a stopped target Emby and a version-specific write to `library.db`. Cross-version media database writes are explicitly rejected.
 
+The `4.8.11.x` and `4.9.5.x` series are supported by default. If you have verified that an additional series shares the same `library.db` schema, declare it via `EMBY_MIGRATOR_DB_VERSIONS` (comma-separated, e.g. `4.8.11,4.9.5,4.9.6`).
+
 ## Recommended migration workflow
 
 ### On the old server
@@ -183,6 +185,7 @@ The UI discovers the target `library.db`. When automatic stop/start is enabled, 
 - A SQLite backup is created before writes, followed by transactional integrity checks.
 - Database paths are restricted to `EMBY_MIGRATOR_EMBY_DB_ROOT`.
 - Set `EMBY_MIGRATOR_SESSION_SECRET` to keep the login cookie signing key stable across restarts.
+- Only set `EMBY_MIGRATOR_TRUST_PROXY=1` when the instance is actually behind a reverse proxy; otherwise clients can forge `X-Forwarded-Proto` / `X-Forwarded-For`.
 
 ## Docker Compose
 
