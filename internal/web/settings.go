@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"emby-migrator/internal/emby"
@@ -128,13 +129,16 @@ func (s *Server) handleAppSettingsSave(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	settings, err := s.settingsFromRequest(req)
+	settings, err := s.updateAppSettings(func(current *appSettings) error {
+		built, err := buildAppSettingsFromRequest(*current, req)
+		if err != nil {
+			return err
+		}
+		*current = built
+		return nil
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.saveAppSettings(settings); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, appSettingsToResponse(settings))
@@ -238,11 +242,7 @@ func (s *Server) resolveEmbyConnection(baseURL, apiKey, profileID string) (emby.
 	return emby.Connection{BaseURL: normalized, APIKey: apiKey}, nil
 }
 
-func (s *Server) settingsFromRequest(req appSettingsRequest) (appSettings, error) {
-	current, err := s.loadAppSettings()
-	if err != nil {
-		return appSettings{}, err
-	}
+func buildAppSettingsFromRequest(current appSettings, req appSettingsRequest) (appSettings, error) {
 	baseURL := strings.TrimSpace(req.Connection.BaseURL)
 	if baseURL == "" {
 		return appSettings{}, fmt.Errorf("请填写 Emby 地址")
@@ -343,12 +343,65 @@ func normalizeImageTypes(values []string) []string {
 	return out
 }
 
+// appSettingsMu serializes whole read-modify-write cycles on settings.json so
+// concurrent saves cannot lose updates; appSettingsCacheMu guards the parsed
+// cache keyed by settings path (the Server struct itself stays untouched).
+var (
+	appSettingsMu      sync.Mutex
+	appSettingsCacheMu sync.Mutex
+	appSettingsCache   = map[string]cachedAppSettings{}
+)
+
+type cachedAppSettings struct {
+	modTime  int64
+	size     int64
+	settings appSettings
+}
+
+// cloneAppSettings copies the mutable slices so cached entries stay safe when
+// callers mutate a loaded value in place.
+func cloneAppSettings(settings appSettings) appSettings {
+	settings.Profiles = append([]appServerProfileSettings(nil), settings.Profiles...)
+	settings.Defaults.Export.ImageTypes = append([]string(nil), settings.Defaults.Export.ImageTypes...)
+	settings.Defaults.Import.ImageTypes = append([]string(nil), settings.Defaults.Import.ImageTypes...)
+	return settings
+}
+
+// updateAppSettings loads the current settings under the write lock, lets fn
+// mutate them, and persists the result atomically.
+func (s *Server) updateAppSettings(fn func(*appSettings) error) (appSettings, error) {
+	appSettingsMu.Lock()
+	defer appSettingsMu.Unlock()
+	settings, err := s.loadAppSettings()
+	if err != nil {
+		return appSettings{}, err
+	}
+	if err := fn(&settings); err != nil {
+		return appSettings{}, err
+	}
+	if err := s.saveAppSettings(settings); err != nil {
+		return appSettings{}, err
+	}
+	return settings, nil
+}
+
 func (s *Server) loadAppSettings() (appSettings, error) {
-	data, err := os.ReadFile(s.appSettingsPath())
+	path := s.appSettingsPath()
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return appSettings{}, nil
 		}
+		return appSettings{}, fmt.Errorf("读取应用配置失败：%w", err)
+	}
+	appSettingsCacheMu.Lock()
+	cached, hit := appSettingsCache[path]
+	appSettingsCacheMu.Unlock()
+	if hit && cached.modTime == info.ModTime().UnixNano() && cached.size == info.Size() {
+		return cloneAppSettings(cached.settings), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return appSettings{}, fmt.Errorf("读取应用配置失败：%w", err)
 	}
 	var settings appSettings
@@ -363,6 +416,13 @@ func (s *Server) loadAppSettings() (appSettings, error) {
 		settings.migrateLegacyProfile()
 	}
 	settings.ensureProfileSelections()
+	appSettingsCacheMu.Lock()
+	appSettingsCache[path] = cachedAppSettings{
+		modTime:  info.ModTime().UnixNano(),
+		size:     info.Size(),
+		settings: cloneAppSettings(settings),
+	}
+	appSettingsCacheMu.Unlock()
 	return settings, nil
 }
 
@@ -375,10 +435,49 @@ func (s *Server) saveAppSettings(settings appSettings) error {
 	if err != nil {
 		return fmt.Errorf("编码应用配置失败：%w", err)
 	}
-	if err := os.WriteFile(s.appSettingsPath(), data, 0o600); err != nil {
+	path := s.appSettingsPath()
+	if err := writeFileAtomic(path, appSettingsFileName+".tmp-", data, 0o600); err != nil {
 		return fmt.Errorf("保存应用配置失败：%w", err)
 	}
+	if info, statErr := os.Stat(path); statErr == nil {
+		appSettingsCacheMu.Lock()
+		appSettingsCache[path] = cachedAppSettings{
+			modTime:  info.ModTime().UnixNano(),
+			size:     info.Size(),
+			settings: cloneAppSettings(settings),
+		}
+		appSettingsCacheMu.Unlock()
+	}
 	return nil
+}
+
+// writeFileAtomic writes data through a temp file in the same directory and
+// renames it into place so concurrent readers never see a partial file.
+func writeFileAtomic(path, tempPrefix string, data []byte, mode os.FileMode) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), tempPrefix+"*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := os.Chmod(tempPath, mode); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 func (s *Server) appSettingsPath() string {
@@ -409,98 +508,83 @@ func appSettingsToResponse(settings appSettings) appSettingsResponse {
 }
 
 func (s *Server) saveProfileFromRequest(req appProfileSaveRequest) (appSettings, error) {
-	settings, err := s.loadAppSettings()
-	if err != nil {
-		return appSettings{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	req.APIKey = strings.TrimSpace(req.APIKey)
-	if req.APIKey == "" {
-		if normalizedBaseURL, err := emby.NormalizeBaseURL(req.BaseURL); err == nil {
-			req.APIKey = savedAPIKeyForProfileSave(settings, normalizedBaseURL)
+	return s.updateAppSettings(func(settings *appSettings) error {
+		now := time.Now().UTC().Format(time.RFC3339)
+		req.APIKey = strings.TrimSpace(req.APIKey)
+		if req.APIKey == "" {
+			if normalizedBaseURL, err := emby.NormalizeBaseURL(req.BaseURL); err == nil {
+				req.APIKey = savedAPIKeyForProfileSave(*settings, normalizedBaseURL)
+			}
 		}
-	}
-	profile, err := normalizedProfileFromSave(req, settings.Profiles, now)
-	if err != nil {
-		return appSettings{}, err
-	}
-	settings.SchemaVersion = 2
-	settings.Profiles = upsertProfile(settings.Profiles, profile)
-	if settings.Connection.BaseURL == "" || settings.Connection.APIKey == "" {
-		settings.Connection = appConnectionSettings{BaseURL: profile.BaseURL, APIKey: profile.APIKey}
-	}
-	if settings.CurrentSource == "" {
-		settings.CurrentSource = profile.ID
-	}
-	if settings.CurrentTarget == "" {
-		settings.CurrentTarget = profile.ID
-	}
-	settings.UpdatedAt = now
-	settings.Profiles = normalizeProfiles(settings.Profiles)
-	settings.ensureProfileSelections()
-	if err := s.saveAppSettings(settings); err != nil {
-		return appSettings{}, err
-	}
-	return settings, nil
+		profile, err := normalizedProfileFromSave(req, settings.Profiles, now)
+		if err != nil {
+			return err
+		}
+		settings.SchemaVersion = 2
+		settings.Profiles = upsertProfile(settings.Profiles, profile)
+		if settings.Connection.BaseURL == "" || settings.Connection.APIKey == "" {
+			settings.Connection = appConnectionSettings{BaseURL: profile.BaseURL, APIKey: profile.APIKey}
+		}
+		if settings.CurrentSource == "" {
+			settings.CurrentSource = profile.ID
+		}
+		if settings.CurrentTarget == "" {
+			settings.CurrentTarget = profile.ID
+		}
+		settings.UpdatedAt = now
+		settings.Profiles = normalizeProfiles(settings.Profiles)
+		settings.ensureProfileSelections()
+		return nil
+	})
 }
 
 func (s *Server) deleteProfile(id string) (appSettings, error) {
-	settings, err := s.loadAppSettings()
-	if err != nil {
-		return appSettings{}, err
-	}
-	index := -1
-	for i, profile := range settings.Profiles {
-		if profile.ID == id {
-			index = i
-			break
+	return s.updateAppSettings(func(settings *appSettings) error {
+		index := -1
+		for i, profile := range settings.Profiles {
+			if profile.ID == id {
+				index = i
+				break
+			}
 		}
-	}
-	if index < 0 {
-		return appSettings{}, fmt.Errorf("server profile not found")
-	}
-	settings.Profiles = append(settings.Profiles[:index], settings.Profiles[index+1:]...)
-	if settings.CurrentSource == id {
-		settings.CurrentSource = ""
-	}
-	if settings.CurrentTarget == id {
-		settings.CurrentTarget = ""
-	}
-	settings.SchemaVersion = 2
-	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	settings.ensureProfileSelections()
-	if err := s.saveAppSettings(settings); err != nil {
-		return appSettings{}, err
-	}
-	return settings, nil
+		if index < 0 {
+			return fmt.Errorf("server profile not found")
+		}
+		settings.Profiles = append(settings.Profiles[:index], settings.Profiles[index+1:]...)
+		if settings.CurrentSource == id {
+			settings.CurrentSource = ""
+		}
+		if settings.CurrentTarget == id {
+			settings.CurrentTarget = ""
+		}
+		settings.SchemaVersion = 2
+		settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		settings.ensureProfileSelections()
+		return nil
+	})
 }
 
 func (s *Server) selectProfiles(req appProfileSelectRequest) (appSettings, error) {
-	settings, err := s.loadAppSettings()
-	if err != nil {
-		return appSettings{}, err
-	}
-	sourceID := coalesceProfileID(req.CurrentSource, req.SourceProfileID)
-	targetID := coalesceProfileID(req.CurrentTarget, req.TargetProfileID)
-	if sourceID != "" {
-		if _, ok := findProfileByID(settings.Profiles, sourceID); !ok {
-			return appSettings{}, fmt.Errorf("source server profile not found")
+	return s.updateAppSettings(func(settings *appSettings) error {
+		sourceID := coalesceProfileID(req.CurrentSource, req.SourceProfileID)
+		targetID := coalesceProfileID(req.CurrentTarget, req.TargetProfileID)
+		if sourceID != "" {
+			if _, ok := findProfileByID(settings.Profiles, sourceID); !ok {
+				return fmt.Errorf("source server profile not found")
+			}
+			settings.CurrentSource = sourceID
 		}
-		settings.CurrentSource = sourceID
-	}
-	if targetID != "" {
-		if _, ok := findProfileByID(settings.Profiles, targetID); !ok {
-			return appSettings{}, fmt.Errorf("target server profile not found")
+		if targetID != "" {
+			if _, ok := findProfileByID(settings.Profiles, targetID); !ok {
+				return fmt.Errorf("target server profile not found")
+			}
+			settings.CurrentTarget = targetID
 		}
-		settings.CurrentTarget = targetID
-	}
-	settings.SchemaVersion = 2
-	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	settings.ensureProfileSelections()
-	if err := s.saveAppSettings(settings); err != nil {
-		return appSettings{}, err
-	}
-	return settings, nil
+		settings.SchemaVersion = 2
+		settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		settings.ensureProfileSelections()
+		return nil
+	})
 }
 
 func normalizedProfileFromSave(req appProfileSaveRequest, existing []appServerProfileSettings, now string) (appServerProfileSettings, error) {

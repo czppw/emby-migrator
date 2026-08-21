@@ -13,7 +13,7 @@ import (
 func TestImportLookupCacheRetriesFetchAfterError(t *testing.T) {
 	cache := newImportLookupCache()
 	fetches := 0
-	fetch := func() ([]emby.Item, error) {
+	fetch := func(context.Context) ([]emby.Item, error) {
 		fetches++
 		if fetches == 1 {
 			return nil, errors.New("temporary lookup failure")
@@ -39,7 +39,7 @@ func TestImportLookupCacheRetriesFetchAfterError(t *testing.T) {
 func TestImportLookupCacheCachesSuccessfulResult(t *testing.T) {
 	cache := newImportLookupCache()
 	fetches := 0
-	fetch := func() ([]emby.Item, error) {
+	fetch := func(context.Context) ([]emby.Item, error) {
 		fetches++
 		return []emby.Item{{ID: "cached"}}, nil
 	}

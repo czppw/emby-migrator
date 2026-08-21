@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"emby-migrator/internal/emby"
@@ -68,13 +69,8 @@ type MediaDatabaseTargetPreflight struct {
 	ActualTarget  ImportTarget `json:"actualTarget"`
 }
 
-func packageMediaInfoPayload(exportPath string, entry storage.ItemEntry) map[string]any {
-	infoPath, err := safePackagePath(exportPath, entry.InfoPath)
-	if err != nil {
-		return nil
-	}
-	var info storage.ItemInfo
-	if err := storage.ReadJSON(infoPath, &info); err != nil {
+func packageMediaInfoPayload(exportPath string, entry storage.ItemEntry, info *storage.ItemInfo) map[string]any {
+	if info == nil {
 		return nil
 	}
 	return sanitizedMediaInfoPayload(info.Item, entry, exportPath)
@@ -101,7 +97,14 @@ func writeMediaDatabasePlan(exportPath string, manifest storage.Manifest, report
 		if !ok {
 			continue
 		}
-		payload := packageMediaInfoPayload(exportPath, entry)
+		// Every planned item already had a readable info.json during import;
+		// failing here means the package changed underneath us, which should
+		// surface instead of silently dropping plan entries.
+		info, err := readItemInfo(exportPath, entry)
+		if err != nil {
+			return nil, fmt.Errorf("media database plan for %s: %w", entry.StableKey, err)
+		}
+		payload := packageMediaInfoPayload(exportPath, entry, info)
 		sources := objectSliceField(payload, "MediaSources")
 		streams := objectSliceField(payload, "MediaStreams")
 		chapters := objectSliceField(payload, "Chapters")
@@ -331,6 +334,11 @@ func buildLegacyMediaDatabaseBinding(serverID string, items []MediaDatabasePlanI
 	}, nil
 }
 
+var (
+	mediaDatabaseStreamVerificationFields  = []string{"Index", "Type", "Codec", "Language", "Width", "Height", "Channels", "SampleRate", "IsDefault", "IsForced"}
+	mediaDatabaseChapterVerificationFields = []string{"ChapterIndex", "StartPositionTicks", "Name", "MarkerType"}
+)
+
 func (s *Service) VerifyMediaDatabasePlan(ctx context.Context, exportName string, connection emby.Connection) (MediaDatabaseVerifyResult, error) {
 	exportPath, _, err := s.ResolveExportPath(exportName)
 	if err != nil {
@@ -348,32 +356,75 @@ func (s *Service) VerifyMediaDatabasePlan(ctx context.Context, exportName string
 	if err != nil {
 		return MediaDatabaseVerifyResult{}, err
 	}
-	result := MediaDatabaseVerifyResult{}
-	for _, planned := range plan.Items {
-		actual, err := client.Item(ctx, planned.TargetItemID)
-		if err != nil {
-			return result, fmt.Errorf("read back target item %s (%s): %w", planned.TargetName, planned.TargetItemID, err)
+
+	// Readbacks are independent HTTP fetches; run them through the same
+	// bounded worker-pool shape the rest of the exporter uses.
+	verifyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	taskCh := make(chan int)
+	workers := workerCount(len(plan.Items), defaultConcurrency)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		result   MediaDatabaseVerifyResult
+		firstErr error
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range taskCh {
+				if err := verifyMediaDatabasePlanItem(verifyCtx, client, plan.Items[index]); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					cancel()
+					return
+				}
+				mu.Lock()
+				result.Items++
+				result.Streams += len(plan.Items[index].MediaStreams)
+				result.Chapters += len(plan.Items[index].Chapters)
+				mu.Unlock()
+			}
+		}()
+	}
+	go func() {
+		defer close(taskCh)
+		for index := range plan.Items {
+			select {
+			case <-verifyCtx.Done():
+				return
+			case taskCh <- index:
+			}
 		}
-		actualPayload := sanitizedMediaInfoPayload(actual, storage.ItemEntry{}, "")
-		actualStreams := mediaDatabaseVerificationFields(objectSliceField(actualPayload, "MediaStreams"),
-			"Index", "Type", "Codec", "Language", "Width", "Height", "Channels", "SampleRate", "IsDefault", "IsForced")
-		expectedStreams := mediaDatabaseVerificationFields(planned.MediaStreams,
-			"Index", "Type", "Codec", "Language", "Width", "Height", "Channels", "SampleRate", "IsDefault", "IsForced")
-		actualChapters := mediaDatabaseVerificationFields(objectSliceField(actualPayload, "Chapters"),
-			"ChapterIndex", "StartPositionTicks", "Name", "MarkerType")
-		expectedChapters := mediaDatabaseVerificationFields(planned.Chapters,
-			"ChapterIndex", "StartPositionTicks", "Name", "MarkerType")
-		if len(expectedStreams) > 0 && !mediaInfoValueContains(actualStreams, expectedStreams) {
-			return result, fmt.Errorf("target item %s (%s) media stream readback does not match the database plan", planned.TargetName, planned.TargetItemID)
-		}
-		if len(expectedChapters) > 0 && !mediaInfoValueContains(actualChapters, expectedChapters) {
-			return result, fmt.Errorf("target item %s (%s) chapter readback does not match the database plan", planned.TargetName, planned.TargetItemID)
-		}
-		result.Items++
-		result.Streams += len(planned.MediaStreams)
-		result.Chapters += len(planned.Chapters)
+	}()
+	wg.Wait()
+	if firstErr != nil {
+		return result, firstErr
 	}
 	return result, nil
+}
+
+func verifyMediaDatabasePlanItem(ctx context.Context, client *emby.Client, planned MediaDatabasePlanItem) error {
+	actual, err := client.Item(ctx, planned.TargetItemID)
+	if err != nil {
+		return fmt.Errorf("read back target item %s (%s): %w", planned.TargetName, planned.TargetItemID, err)
+	}
+	actualPayload := sanitizedMediaInfoPayload(actual, storage.ItemEntry{}, "")
+	actualStreams := mediaDatabaseVerificationFields(objectSliceField(actualPayload, "MediaStreams"), mediaDatabaseStreamVerificationFields...)
+	expectedStreams := mediaDatabaseVerificationFields(planned.MediaStreams, mediaDatabaseStreamVerificationFields...)
+	actualChapters := mediaDatabaseVerificationFields(objectSliceField(actualPayload, "Chapters"), mediaDatabaseChapterVerificationFields...)
+	expectedChapters := mediaDatabaseVerificationFields(planned.Chapters, mediaDatabaseChapterVerificationFields...)
+	if len(expectedStreams) > 0 && !mediaInfoValueContains(actualStreams, expectedStreams) {
+		return fmt.Errorf("target item %s (%s) media stream readback does not match the database plan", planned.TargetName, planned.TargetItemID)
+	}
+	if len(expectedChapters) > 0 && !mediaInfoValueContains(actualChapters, expectedChapters) {
+		return fmt.Errorf("target item %s (%s) chapter readback does not match the database plan", planned.TargetName, planned.TargetItemID)
+	}
+	return nil
 }
 
 func mediaDatabaseVerificationFields(values []map[string]any, fields ...string) []map[string]any {
@@ -381,7 +432,7 @@ func mediaDatabaseVerificationFields(values []map[string]any, fields ...string) 
 	for _, value := range values {
 		item := make(map[string]any, len(fields))
 		for _, field := range fields {
-			if raw, ok := mapValueFold(value, field); ok && raw != nil {
+			if raw, ok := lookupValueFold(value, field); ok && raw != nil {
 				item[field] = raw
 			}
 		}

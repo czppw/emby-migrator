@@ -9,6 +9,7 @@ import (
 )
 
 func TestSecurityHeaders(t *testing.T) {
+	t.Setenv("EMBY_MIGRATOR_TRUST_PROXY", "1")
 	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))

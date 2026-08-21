@@ -1,6 +1,7 @@
 package web
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ type Server struct {
 	telegramNotifications sync.Map
 	docker                dockerController
 	versionCheck          versionCheckCache
+	shutdownCh            chan struct{}
 }
 
 type connectionRequest struct {
@@ -101,6 +103,17 @@ func NewServer(cfg config.Config, jobs *job.Manager, exporter *exporter.Service)
 		sessionSecret: makeSessionSecret(cfg.SessionSecret),
 		loginAttempts: make(map[string]loginAttemptState),
 		docker:        newDockerController(cfg.DockerHost),
+		shutdownCh:    make(chan struct{}),
+	}
+}
+
+// Shutdown unblocks any open SSE log streams so srv.Shutdown can finish
+// instead of timing out while a browser holds a streaming connection open.
+func (s *Server) Shutdown() {
+	select {
+	case <-s.shutdownCh:
+	default:
+		close(s.shutdownCh)
 	}
 }
 
@@ -142,8 +155,48 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /api/jobs/{id}/stop", s.requireRole(roleOperator, http.HandlerFunc(s.handleStopJob)))
 	mux.Handle("GET /api/jobs/{id}/logs", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobLogs)))
 	mux.Handle("GET /api/jobs/{id}/logs.txt", s.requireRole(roleViewer, http.HandlerFunc(s.handleJobLogDownload)))
-	mux.Handle("/", http.FileServer(http.Dir("web")))
+	mux.Handle("/", gzipStatic(http.FileServer(http.Dir("web"))))
 	return securityHeaders(recoverJSON(mux))
+}
+
+// gzipResponseWriter compresses a response body on the fly; WriteHeader
+// records the Content-Encoding and drops Content-Length, which is no longer
+// accurate once the body is deflated.
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz *gzip.Writer
+}
+
+func (w *gzipResponseWriter) WriteHeader(status int) {
+	w.Header().Del("Content-Length")
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Add("Vary", "Accept-Encoding")
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *gzipResponseWriter) Write(data []byte) (int, error) {
+	return w.gz.Write(data)
+}
+
+func gzipStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !shouldGzipStatic(r.URL.Path) || !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		next.ServeHTTP(&gzipResponseWriter{ResponseWriter: w, gz: gz}, r)
+	})
+}
+
+func shouldGzipStatic(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".html", ".js", ".css", ".json", ".svg", ".txt", ".map", ".xml":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -530,10 +583,18 @@ func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	ch, unsubscribe := j.Subscribe()
 	defer unsubscribe()
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.shutdownCh:
+			return
+		case <-keepalive.C:
+			// Comment keepalive so idle proxies do not drop the stream.
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
 		case entry, ok := <-ch:
 			if !ok {
 				data, _ := json.Marshal(j.Snapshot())
@@ -567,12 +628,16 @@ func (s *Server) handleJobLogDownload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func beijingTime(value time.Time) time.Time {
+var beijingLocation = func() *time.Location {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
-		return value.Local()
+		return time.Local
 	}
-	return value.In(location)
+	return location
+}()
+
+func beijingTime(value time.Time) time.Time {
+	return value.In(beijingLocation)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {

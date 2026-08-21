@@ -5,10 +5,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-COPY web ./web
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/emby-migrator ./cmd/server
 
-FROM alpine:3.20
+FROM alpine:3.22
 
 LABEL org.opencontainers.image.title="Emby Migrator" \
       org.opencontainers.image.description="Docker Web tool for migrating Emby metadata, artwork, people and media information" \

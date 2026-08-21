@@ -467,6 +467,7 @@ func TestExpiredLoginRateLimitIsCleanedUp(t *testing.T) {
 }
 
 func TestForwardedHTTPSProducesSecureSessionCookies(t *testing.T) {
+	t.Setenv("EMBY_MIGRATOR_TRUST_PROXY", "1")
 	s := &Server{}
 	r := httptest.NewRequest(http.MethodPost, "http://example.test/api/auth/login", nil)
 	r.Header.Set("X-Forwarded-Proto", "https")

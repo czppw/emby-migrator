@@ -3,11 +3,13 @@ package emby
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -825,5 +827,60 @@ func writeJSON(t *testing.T, w http.ResponseWriter, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		t.Fatalf("failed to write JSON response: %v", err)
+	}
+}
+
+func TestGETRetriesTransientFailures(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		n := atomic.AddInt32(&attempts, 1)
+		switch n {
+		case 1:
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+		case 2:
+			http.Error(w, "upstream gone", http.StatusBadGateway)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"Items":[],"TotalRecordCount":0}`)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testAPIKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ItemsResponse
+	if err := client.JSON(context.Background(), http.MethodGet, "/Items", nil, nil, &out); err != nil {
+		t.Fatalf("GET should succeed after retries: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Fatalf("expected 3 attempts, got %d", got)
+	}
+}
+
+func TestPOSTIsNotRetried(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		http.Error(w, "boom", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testAPIKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.JSON(context.Background(), http.MethodPost, "/Items/123", nil, map[string]any{"Name": "x"}, nil)
+	if err == nil {
+		t.Fatal("POST should surface the 503 error")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("POST must not be retried, got %d attempts", got)
 	}
 }

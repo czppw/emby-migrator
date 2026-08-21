@@ -102,6 +102,7 @@ func NewClientWithOptions(options ClientOptions) *Client {
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "unix", socketPath)
 			},
+			ResponseHeaderTimeout: 30 * time.Second,
 		}
 		httpClient = &http.Client{Transport: transport}
 	}

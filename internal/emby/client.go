@@ -7,17 +7,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"mime"
 	"net/http"
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	DefaultLimit = 100
+)
+
+// sharedTransport keeps idle connections warm across clients. The default
+// transport's MaxIdleConnsPerHost of 2 forces a new TCP connection for nearly
+// every request once exporters run with worker pools.
+var sharedTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
+}()
+
+const (
+	maxGETRetries   = 3
+	retryAfterCap   = 30 * time.Second
+	retryBaseDelay  = 500 * time.Millisecond
+	retryMaxBackoff = 2 * time.Second
 )
 
 var DefaultImageTypes = []string{
@@ -36,6 +57,10 @@ type Client struct {
 	BaseURL    string
 	APIKey     string
 	HTTPClient *http.Client
+	// baseURL is the pre-parsed form of BaseURL, set by NewClient. It may be
+	// nil when a Client is built as a struct literal; request building falls
+	// back to parsing BaseURL in that case.
+	baseURL *url.URL
 }
 
 type ClientConfig struct {
@@ -400,9 +425,13 @@ func NewClient(args ...any) (*Client, error) {
 		return nil, fmt.Errorf("NewClient expects ClientConfig or baseURL, apiKey")
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 60 * time.Second}
+		cfg.HTTPClient = &http.Client{Timeout: 60 * time.Second, Transport: sharedTransport}
 	}
 	normalized, err := NormalizeBaseURL(cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := url.Parse(normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -410,6 +439,7 @@ func NewClient(args ...any) (*Client, error) {
 		BaseURL:    normalized,
 		APIKey:     cfg.APIKey,
 		HTTPClient: cfg.HTTPClient,
+		baseURL:    parsed,
 	}, nil
 }
 
@@ -460,16 +490,31 @@ func RedactURL(raw string) string {
 	return u.String()
 }
 
+// parsedBaseURL returns the pre-parsed base URL, falling back to parsing
+// BaseURL for clients constructed without NewClient.
+func (c *Client) parsedBaseURL() (*url.URL, error) {
+	if c.baseURL != nil {
+		return c.baseURL, nil
+	}
+	return url.Parse(c.BaseURL)
+}
+
 func (c *Client) BuildURL(endpoint string, params url.Values) string {
-	u, err := url.Parse(c.BaseURL)
+	u, err := c.parsedBaseURL()
 	if err != nil {
 		return ""
 	}
+	u = cloneURL(u)
 	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(path.Clean("/"+endpoint), "/")
 	if params != nil {
 		u.RawQuery = params.Encode()
 	}
 	return u.String()
+}
+
+func cloneURL(u *url.URL) *url.URL {
+	copied := *u
+	return &copied
 }
 
 func (c *Client) SystemInfo(ctx context.Context) (SystemInfo, error) {
@@ -488,26 +533,48 @@ func (c *Client) Libraries(ctx context.Context) ([]Library, error) {
 		if item.Type != "CollectionFolder" && item.Type != "Folder" {
 			continue
 		}
-		count := item.ChildCount
-		if count == 0 {
-			var countResult ItemsResponse
-			err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
-				"ParentId": {item.ID},
-				"Limit":    {"0"},
-			}, nil, &countResult)
-			if err == nil {
-				count = countResult.TotalRecordCount
-			}
-		}
 		libraries = append(libraries, Library{
 			ID:             item.ID,
 			Name:           item.Name,
 			Type:           item.Type,
 			CollectionType: item.CollectionType,
-			Count:          count,
-			ItemCount:      count,
+			Count:          item.ChildCount,
+			ItemCount:      item.ChildCount,
 		})
 	}
+	// Fetch missing counts in parallel (bounded) instead of one RTT per
+	// library; individual failures still degrade to the child count.
+	const countWorkers = 4
+	type countJob struct {
+		index int
+		id    string
+	}
+	jobs := make(chan countJob)
+	var wg sync.WaitGroup
+	for worker := 0; worker < countWorkers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				var countResult ItemsResponse
+				err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
+					"ParentId": {job.id},
+					"Limit":    {"0"},
+				}, nil, &countResult)
+				if err == nil && countResult.TotalRecordCount > 0 {
+					libraries[job.index].Count = countResult.TotalRecordCount
+					libraries[job.index].ItemCount = countResult.TotalRecordCount
+				}
+			}
+		}()
+	}
+	for i := range libraries {
+		if libraries[i].Count == 0 {
+			jobs <- countJob{index: i, id: libraries[i].ID}
+		}
+	}
+	close(jobs)
+	wg.Wait()
 	sort.Slice(libraries, func(i, j int) bool {
 		return libraries[i].Name < libraries[j].Name
 	})
@@ -817,28 +884,6 @@ func imagePath(itemID string, image ImageInfo) string {
 	return base
 }
 
-func (c *Client) DownloadPath(ctx context.Context, endpoint string) ([]byte, string, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, "", fmt.Errorf("emby %s failed: HTTP %d %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", err
-	}
-	ext := extensionFromContentType(resp.Header.Get("Content-Type"))
-	return data, ext, nil
-}
-
 func (c *Client) DownloadPersonImage(ctx context.Context, name string) ([]byte, string, error) {
 	return c.DownloadPath(ctx, "/Persons/"+url.PathEscape(name)+"/Images/Primary")
 }
@@ -920,7 +965,7 @@ func (c *Client) JSON(ctx context.Context, method, endpoint string, params url.V
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -937,10 +982,11 @@ func (c *Client) JSON(ctx context.Context, method, endpoint string, params url.V
 }
 
 func (c *Client) newRequest(ctx context.Context, method, endpoint string, params url.Values, body io.Reader) (*http.Request, error) {
-	u, err := url.Parse(c.BaseURL)
+	base, err := c.parsedBaseURL()
 	if err != nil {
 		return nil, err
 	}
+	u := cloneURL(base)
 	escapedPath := strings.TrimRight(u.EscapedPath(), "/") + "/" + strings.TrimLeft(path.Clean("/"+endpoint), "/")
 	decodedPath, err := url.PathUnescape(escapedPath)
 	if err != nil {
@@ -960,6 +1006,95 @@ func (c *Client) newRequest(ctx context.Context, method, endpoint string, params
 		req.Header.Set("X-Emby-Token", c.APIKey)
 	}
 	return req, nil
+}
+
+// do executes req, retrying idempotent GET requests on transient failures
+// (network errors, 429, 502, 503, 504) with exponential backoff and jitter.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	attempts := 1
+	if req.Method == http.MethodGet {
+		attempts = maxGETRetries
+	}
+	var resp *http.Response
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 && req.Body != nil {
+			body, bodyErr := req.GetBody()
+			if bodyErr != nil {
+				return nil, bodyErr
+			}
+			req.Body = body
+		}
+		resp, err = c.HTTPClient.Do(req)
+		if err != nil {
+			if req.Context().Err() != nil || attempt == attempts-1 {
+				return nil, err
+			}
+		} else if !retryableStatus(resp.StatusCode) || attempt == attempts-1 {
+			return resp, nil
+		} else {
+			// Drain the error body so the connection can be reused.
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+			resp.Body.Close()
+		}
+		sleepFor := retryDelay(attempt, resp)
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(sleepFor):
+		}
+	}
+	return resp, err
+}
+
+func retryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests ||
+		status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout
+}
+
+func retryDelay(attempt int, resp *http.Response) time.Duration {
+	delay := retryBaseDelay << attempt
+	if delay > retryMaxBackoff {
+		delay = retryMaxBackoff
+	}
+	if resp != nil {
+		if after := strings.TrimSpace(resp.Header.Get("Retry-After")); after != "" {
+			if seconds, err := strconv.Atoi(after); err == nil && seconds > 0 {
+				if capped := time.Duration(seconds) * time.Second; capped < delay {
+					delay = capped
+				}
+			}
+		}
+	}
+	// Full jitter to avoid synchronized retry storms.
+	half := delay / 2
+	return half + time.Duration(jitterRand.Int63n(int64(half)+1))
+}
+
+var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+func (c *Client) DownloadPath(ctx context.Context, endpoint string) ([]byte, string, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, "", fmt.Errorf("emby %s failed: HTTP %d %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	ext := extensionFromContentType(resp.Header.Get("Content-Type"))
+	return data, ext, nil
 }
 
 func extensionFromContentType(contentType string) string {

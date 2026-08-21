@@ -110,7 +110,18 @@ func (s *Server) authenticateConfiguredUser(cfg usersConfig, username, password 
 		}
 		return authPrincipal{}, false, nil
 	}
+	// Equalize timing with the known-username path so response latency cannot
+	// be used to enumerate valid usernames.
+	dummyPasswordCompare(password)
 	return authPrincipal{}, false, nil
+}
+
+// dummyBcryptHash is a throwaway hash used only to burn a bcrypt comparison
+// for unknown usernames.
+var dummyBcryptHash, _ = newPasswordHash("emby-migrator-timing-equalizer-3f9c2a")
+
+func dummyPasswordCompare(password string) {
+	_ = bcrypt.CompareHashAndPassword([]byte(dummyBcryptHash), []byte(password))
 }
 
 func (s *Server) changeCurrentPassword(username, oldPassword, newPassword string) error {
@@ -465,7 +476,7 @@ func writeUsersConfig(path string, cfg usersConfig) error {
 		return fmt.Errorf("encode users config: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeFileAtomic(path, usersFileName+".tmp-", data, 0o600); err != nil {
 		return fmt.Errorf("save users config: %w", err)
 	}
 	return nil

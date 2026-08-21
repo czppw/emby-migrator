@@ -100,15 +100,7 @@ func (s *Server) telegramSettingsFromRequest(w http.ResponseWriter, r *http.Requ
 		ChatID:   strings.TrimSpace(req.ChatID),
 		ProxyURL: proxyURL,
 	}
-	if settings.BotToken == "" && preserveSavedToken {
-		saved, err := s.loadTelegramSettings()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return nil, err
-		}
-		settings.BotToken = saved.BotToken
-	}
-	if settings.BotToken == "" && !preserveSavedToken {
+	if settings.BotToken == "" {
 		saved, err := s.loadTelegramSettings()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -147,7 +139,7 @@ func (s *Server) saveTelegramSettings(settings telegramSettings) error {
 	if err != nil {
 		return fmt.Errorf("encode Telegram settings failed: %w", err)
 	}
-	if err := os.WriteFile(s.telegramSettingsPath(), data, 0o600); err != nil {
+	if err := writeFileAtomic(s.telegramSettingsPath(), telegramSettingsFileName+".tmp-", data, 0o600); err != nil {
 		return fmt.Errorf("save Telegram settings failed: %w", err)
 	}
 	return nil
@@ -281,10 +273,28 @@ func (s *Server) notifyTelegramJobTerminal(j *job.Job) {
 	if _, loaded := s.telegramNotifications.LoadOrStore(snapshot.ID, struct{}{}); loaded {
 		return
 	}
+	s.pruneTelegramNotifications()
 	logs := j.Logs()
 	go func() {
 		_ = s.sendTelegramJobTerminalNotification(context.Background(), &snapshot, logs)
 	}()
+}
+
+// pruneTelegramNotifications keeps the dedup map bounded by dropping entries
+// whose job no longer exists in the manager.
+func (s *Server) pruneTelegramNotifications() {
+	if s.jobs == nil {
+		return
+	}
+	s.telegramNotifications.Range(func(key, _ any) bool {
+		id, ok := key.(string)
+		if ok {
+			if _, exists := s.jobs.Get(id); !exists {
+				s.telegramNotifications.Delete(id)
+			}
+		}
+		return true
+	})
 }
 
 func (s *Server) sendTelegramJobTerminalNotification(ctx context.Context, snapshot *job.Job, logs []job.LogEntry) error {

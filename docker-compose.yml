@@ -2,7 +2,17 @@ services:
   emby-migrator:
     image: ${EMBY_MIGRATOR_IMAGE:-czppwa/emby-migrator:latest}
     container_name: emby-migrator
-    network_mode: host
+    # Default to loopback-only publishing so the web UI is not exposed to the
+    # network by default. Remove the "127.0.0.1:" prefix to expose remotely
+    # (put it behind TLS or an SSH tunnel first), or restore
+    # `network_mode: host` if you need the container to share the host stack.
+    ports:
+      - "127.0.0.1:8787:8787"
+    # Lets the container reach an Emby running on the host via
+    # http://host.docker.internal:8096 without switching to host networking.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 30s
     environment:
       TZ: Asia/Shanghai
       EMBY_MIGRATOR_PASSWORD: password

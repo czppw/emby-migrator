@@ -108,6 +108,7 @@
     sseErrorReported: false,
     pollTimer: 0,
     seenLogLines: new Set(),
+    logLineCount: 0,
   };
 
   const els = {};
@@ -274,6 +275,7 @@
     els.clearLogsBtn.addEventListener("click", () => {
       els.logWindow.textContent = "";
       state.seenLogLines.clear();
+      state.logLineCount = 0;
     });
 
     els.serverUrl.addEventListener("input", handleConnectionInputChanged);
@@ -2132,6 +2134,9 @@
     source.onopen = () => {
       appendSystemLog(`已连接任务 ${jobId} 日志流。`);
       els.logSummary.textContent = `正在接收任务 ${jobId} 的日志。`;
+      // SSE is delivering live updates; the 2s polling fallback is redundant
+      // while the stream is healthy.
+      stopPolling();
     };
 
     source.onmessage = (event) => {
@@ -2161,6 +2166,11 @@
       if (!state.sseErrorReported) {
         appendSystemLog("日志流暂时中断，状态轮询会继续。");
         state.sseErrorReported = true;
+      }
+      // Stream dropped (or the job ended and the server closed it): fall
+      // back to polling until SSE reconnects.
+      if (!state.pollTimer) {
+        startPolling();
       }
     };
   }
@@ -2975,7 +2985,8 @@
     state.seenLogLines.add(normalized);
     compactSeenLogLines();
     const line = sanitized.endsWith("\n") ? sanitized : `${sanitized}\n`;
-    els.logWindow.textContent += line;
+    els.logWindow.appendChild(document.createTextNode(line));
+    state.logLineCount += Math.max(1, line.split("\n").length - 1);
     trimLogWindow();
     els.logWindow.scrollTop = els.logWindow.scrollHeight;
   }
@@ -2984,20 +2995,24 @@
     if (state.seenLogLines.size <= MAX_LOG_LINES * 3) {
       return;
     }
-    state.seenLogLines = new Set(
-      els.logWindow.textContent
+    const retained = new Set();
+    els.logWindow.childNodes.forEach((node) => {
+      String(node.textContent || "")
         .split("\n")
         .map((line) => line.trimEnd())
-        .filter(Boolean),
-    );
+        .filter(Boolean)
+        .forEach((line) => retained.add(line));
+    });
+    state.seenLogLines = retained;
   }
 
   function trimLogWindow() {
-    const lines = els.logWindow.textContent.split("\n");
-    if (lines.length <= MAX_LOG_LINES + 1) {
-      return;
+    while (state.logLineCount > MAX_LOG_LINES && els.logWindow.firstChild) {
+      const text = String(els.logWindow.firstChild.textContent || "");
+      const nodeLines = Math.max(1, text.split("\n").length - (text.endsWith("\n") ? 1 : 0));
+      els.logWindow.removeChild(els.logWindow.firstChild);
+      state.logLineCount -= nodeLines;
     }
-    els.logWindow.textContent = lines.slice(-(MAX_LOG_LINES + 1)).join("\n");
   }
 
   function sanitizeLogText(text) {

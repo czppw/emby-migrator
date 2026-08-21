@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -381,16 +382,16 @@ func newImportLookupCache() *importLookupCache {
 func (c *importLookupCache) searchItems(ctx context.Context, client *emby.Client, searchTerm, includeTypes string, limit int, libraryIDs []string) ([]emby.Item, error) {
 	libraryIDs = normalizeTargetLibraryIDs(libraryIDs)
 	key := fmt.Sprintf("search:%s:%s:%d:%s", strings.ToLower(strings.TrimSpace(searchTerm)), strings.ToLower(strings.TrimSpace(includeTypes)), limit, targetLibraryCacheKey(libraryIDs))
-	return c.itemLookup(ctx, key, func() ([]emby.Item, error) {
-		return client.SearchItemsInLibraries(ctx, searchTerm, includeTypes, limit, libraryIDs)
+	return c.itemLookup(ctx, key, func(fetchCtx context.Context) ([]emby.Item, error) {
+		return client.SearchItemsInLibraries(fetchCtx, searchTerm, includeTypes, limit, libraryIDs)
 	})
 }
 
 func (c *importLookupCache) itemsByProviderID(ctx context.Context, client *emby.Client, providerID string, libraryIDs []string) ([]emby.Item, error) {
 	libraryIDs = normalizeTargetLibraryIDs(libraryIDs)
 	key := "provider:" + strings.ToLower(strings.TrimSpace(providerID)) + ":" + targetLibraryCacheKey(libraryIDs)
-	return c.itemLookup(ctx, key, func() ([]emby.Item, error) {
-		return client.ItemsByProviderIDInLibraries(ctx, providerID, libraryIDs)
+	return c.itemLookup(ctx, key, func(fetchCtx context.Context) ([]emby.Item, error) {
+		return client.ItemsByProviderIDInLibraries(fetchCtx, providerID, libraryIDs)
 	})
 }
 
@@ -410,12 +411,16 @@ func (c *importLookupCache) findPersonByName(ctx context.Context, client *emby.C
 	c.personCalls[key] = call
 	c.mu.Unlock()
 
-	call.person, call.err = findPersonByNameCached(ctx, client, name)
+	// Decouple the fetch from whichever goroutine initiated it: a single
+	// caller timing out must not pin its deadline onto every waiter.
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), importMatchTimeout)
+	call.person, call.err = findPersonByNameCached(fetchCtx, client, name)
+	cancel()
 	close(call.ready)
 	return call.person, call.err
 }
 
-func (c *importLookupCache) itemLookup(ctx context.Context, key string, fetch func() ([]emby.Item, error)) ([]emby.Item, error) {
+func (c *importLookupCache) itemLookup(ctx context.Context, key string, fetch func(context.Context) ([]emby.Item, error)) ([]emby.Item, error) {
 	c.mu.Lock()
 	if call := c.itemCalls[key]; call != nil {
 		c.mu.Unlock()
@@ -430,7 +435,9 @@ func (c *importLookupCache) itemLookup(ctx context.Context, key string, fetch fu
 	c.itemCalls[key] = call
 	c.mu.Unlock()
 
-	call.items, call.err = fetch()
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), importMatchTimeout)
+	call.items, call.err = fetch(fetchCtx)
+	cancel()
 	c.mu.Lock()
 	if call.err != nil && c.itemCalls[key] == call {
 		delete(c.itemCalls, key)
@@ -580,7 +587,7 @@ func exportDirectoryName(exportedAt time.Time, serverName string, libraries []em
 	return storage.SafeName(strings.Join(parts, "-"))
 }
 
-func (s *Service) uniqueExportDirectory(baseName string) (string, string) {
+func (s *Service) uniqueExportDirectory(baseName string) (string, string, error) {
 	baseName = storage.SafeName(baseName)
 	if baseName == "" {
 		baseName = time.Now().Format("20060102-150405")
@@ -591,12 +598,17 @@ func (s *Service) uniqueExportDirectory(baseName string) (string, string) {
 			name = fmt.Sprintf("%s-%d", baseName, i+1)
 		}
 		dir := filepath.Join(s.ExportsDir(), name)
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			if _, err := os.Stat(dir + ".partial"); !os.IsNotExist(err) {
-				continue
-			}
-			return name, dir
+		if _, err := os.Stat(dir); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return "", "", fmt.Errorf("inspect export directory %s: %w", name, err)
 		}
+		if _, err := os.Stat(dir + ".partial"); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return "", "", fmt.Errorf("inspect partial export directory %s: %w", name+".partial", err)
+		}
+		return name, dir, nil
 	}
 }
 
@@ -605,7 +617,10 @@ func (s *Service) createPartialExportDirectory(baseName string) (string, string,
 		return "", "", "", err
 	}
 	for {
-		name, finalDir := s.uniqueExportDirectory(baseName)
+		name, finalDir, err := s.uniqueExportDirectory(baseName)
+		if err != nil {
+			return "", "", "", err
+		}
 		partialDir := finalDir + ".partial"
 		if err := os.Mkdir(partialDir, 0o755); err != nil {
 			if os.IsExist(err) {
@@ -1077,14 +1092,22 @@ func ValidateExportPackage(exportPath string, manifest storage.Manifest) Package
 			validation.addError("%s 文件大小不一致：%s", scope, file.Path)
 		}
 		if strings.TrimSpace(file.SHA256) != "" {
-			data, err := os.ReadFile(path)
+			fh, err := os.Open(path)
 			if err != nil {
 				validation.InvalidPaths++
 				validation.addError("%s 无法读取校验：%s", scope, err)
 				return
 			}
-			sum := sha256.Sum256(data)
-			if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(file.SHA256)) {
+			hasher := sha256.New()
+			_, copyErr := io.Copy(hasher, fh)
+			closeErr := fh.Close()
+			if copyErr != nil || closeErr != nil {
+				validation.InvalidPaths++
+				validation.addError("%s 无法读取校验：%s", scope, errors.Join(copyErr, closeErr))
+				return
+			}
+			sum := hasher.Sum(nil)
+			if !strings.EqualFold(hex.EncodeToString(sum), strings.TrimSpace(file.SHA256)) {
 				validation.ChecksumMismatches++
 				validation.addError("%s SHA256 不一致：%s", scope, file.Path)
 			}
@@ -1505,16 +1528,28 @@ func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *em
 	}
 
 	taskCh := make(chan exportPersonImageTask)
-	resultCh := make(chan exportPersonImageResult, len(tasks))
+	resultCh := make(chan exportPersonImageResult)
 	workers := workerCount(len(tasks), concurrency)
+	var pool sync.WaitGroup
 	j.Log("info", "开始导出人物头像：%d 个，并发 %d", len(tasks), workers)
 	for i := 0; i < workers; i++ {
+		pool.Add(1)
 		go func() {
+			defer pool.Done()
 			for task := range taskCh {
-				resultCh <- s.exportPersonImage(ctx, client, exportDir, people, task)
+				result := s.exportPersonImage(ctx, client, exportDir, people, task)
+				select {
+				case resultCh <- result:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
+	go func() {
+		pool.Wait()
+		close(resultCh)
+	}()
 
 	go func() {
 		defer close(taskCh)
@@ -1538,11 +1573,15 @@ func (s *Service) exportPeopleImages(ctx context.Context, j *job.Job, client *em
 	failures := make([]storage.ErrorEntry, 0)
 	ticker := time.NewTicker(exportHeartbeatInterval)
 	defer ticker.Stop()
-	for done < len(tasks) {
+loop:
+	for {
 		select {
 		case <-ctx.Done():
 			return failures, ctx.Err()
-		case result := <-resultCh:
+		case result, ok := <-resultCh:
+			if !ok {
+				break loop
+			}
 			done++
 			switch {
 			case result.Err != nil:
@@ -1614,19 +1653,31 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	if len(tasks) == 0 {
 		return results, nil
 	}
+	libSlug := storage.SafeName(lib.Name)
 
 	taskCh := make(chan exportItemTask)
-	resultCh := make(chan exportItemResult, len(tasks))
+	resultCh := make(chan exportItemResult)
 	workers := workerCount(len(tasks), concurrency)
+	var pool sync.WaitGroup
 	j.Log("info", "开始处理媒体库：%s，共 %d 个项目，并发 %d", lib.Name, len(tasks), workers)
 	for i := 0; i < workers; i++ {
+		pool.Add(1)
 		go func() {
+			defer pool.Done()
 			for task := range taskCh {
-				entry, imageErrors, err := s.exportItem(ctx, client, exportDir, lib, task.Item, task.Slug, imageTypeSet, req, people, baselineItems)
-				resultCh <- exportItemResult{Index: task.Index, Item: task.Item, Entry: entry, Errors: imageErrors, Err: err}
+				entry, imageErrors, err := s.exportItem(ctx, client, exportDir, lib, libSlug, task.Item, task.Slug, imageTypeSet, req, people, baselineItems)
+				select {
+				case resultCh <- exportItemResult{Index: task.Index, Item: task.Item, Entry: entry, Errors: imageErrors, Err: err}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
+	go func() {
+		pool.Wait()
+		close(resultCh)
+	}()
 
 	go func() {
 		defer close(taskCh)
@@ -1645,11 +1696,15 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	done := 0
 	ticker := time.NewTicker(exportHeartbeatInterval)
 	defer ticker.Stop()
-	for done < len(tasks) {
+loop:
+	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case result := <-resultCh:
+		case result, ok := <-resultCh:
+			if !ok {
+				break loop
+			}
 			done++
 			results[result.Index] = result
 			if done == 1 || done%exportProgressEvery == 0 || done == len(tasks) {
@@ -1664,7 +1719,7 @@ func (s *Service) exportLibraryItems(ctx context.Context, j *job.Job, client *em
 	return results, nil
 }
 
-func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, baselineItems map[string]storage.ItemEntry) (storage.ItemEntry, []storage.ErrorEntry, error) {
+func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir string, lib emby.Library, libSlug string, item emby.Item, itemSlug string, imageTypeSet map[string]bool, req ExportRequest, people *peopleRegistry, baselineItems map[string]storage.ItemEntry) (storage.ItemEntry, []storage.ErrorEntry, error) {
 	enriched, err := s.enrichExportItem(ctx, client, item, req.IncludeMediaInfo)
 	if err != nil {
 		return storage.ItemEntry{}, nil, err
@@ -1674,11 +1729,14 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		item = itemWithoutMediaInfo(item)
 	}
 	stableKey := storage.StableItemKey(item)
-	fingerprint := itemFingerprint(item)
 	mediaInfo := mediaInfoFromItem(item)
-	itemDir := filepath.Join(exportDir, "libraries", storage.SafeName(lib.Name), "items", itemSlug)
-	infoRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "info.json"))
-	rawRel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, "raw.json"))
+	// Fingerprints must be persisted on every export: a full export serves as
+	// the baseline that a later incremental run compares against.
+	fingerprint := itemFingerprintWithMediaInfo(item, mediaInfo)
+	itemDir := filepath.Join(exportDir, "libraries", libSlug, "items", itemSlug)
+	itemRelDir := filepath.ToSlash(filepath.Join("libraries", libSlug, "items", itemSlug))
+	infoRel := itemRelDir + "/info.json"
+	rawRel := itemRelDir + "/raw.json"
 	info := storage.ItemInfo{Item: item, StableKey: stableKey, ExportedAt: time.Now(), People: item.People, MediaInfo: mediaInfo}
 
 	entry := storage.ItemEntry{
@@ -1720,33 +1778,17 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 				images = emby.DirectImageInfos(item.ID, imageTypesForDirectFallback(req.ImageTypes))
 			}
 		}
+		selected := make([]emby.ImageInfo, 0, len(images))
 		for _, image := range images {
 			if len(imageTypeSet) > 0 && !imageTypeSet[strings.ToLower(image.ImageType)] {
 				continue
 			}
-			data, ext, err := client.DownloadPath(ctx, image.DownloadPath)
-			if err != nil || len(data) == 0 {
-				if authoritativeImages {
-					if err == nil {
-						err = fmt.Errorf("empty image response")
-					}
-					imageErrors = append(imageErrors, storage.ErrorEntry{Scope: "item-image", ID: item.ID, Name: item.Name, Message: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, err)})
-				}
-				continue
-			}
-			fileName := imageFileName(image, ext)
-			rel := filepath.ToSlash(filepath.Join("libraries", storage.SafeName(lib.Name), "items", itemSlug, fileName))
-			file, err := storage.WriteBytes(filepath.Join(exportDir, rel), data)
-			if err != nil {
-				imageErrors = append(imageErrors, storage.ErrorEntry{Scope: "item-image", ID: item.ID, Name: item.Name, Message: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, err)})
-				continue
-			}
-			file.Type = image.ImageType
-			file.Index = image.ImageIndex
-			file.Path = rel
-			entry.Images = append(entry.Images, file)
-			info.Images = append(info.Images, file)
+			selected = append(selected, image)
 		}
+		files, errs := downloadItemImages(ctx, client, item, selected, authoritativeImages, exportDir, itemRelDir)
+		entry.Images = append(entry.Images, files...)
+		info.Images = append(info.Images, files...)
+		imageErrors = append(imageErrors, errs...)
 	}
 
 	for _, person := range item.People {
@@ -1764,6 +1806,73 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 		return entry, imageErrors, err
 	}
 	return entry, imageErrors, nil
+}
+
+// itemImageParallelism bounds concurrent image downloads inside a single
+// item; cross-item concurrency is already spread across the export workers.
+const itemImageParallelism = 3
+
+type itemImageOutcome struct {
+	file  storage.FileEntry
+	ok    bool
+	// errMsg is preformatted with the image type/index; fetch failures are
+	// only recorded when the image list was authoritative, write failures
+	// always are.
+	errMsg       string
+	alwaysRecord bool
+}
+
+func downloadItemImages(ctx context.Context, client *emby.Client, item emby.Item, images []emby.ImageInfo, authoritative bool, exportDir, itemRelDir string) ([]storage.FileEntry, []storage.ErrorEntry) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	outcomes := make([]itemImageOutcome, len(images))
+	sem := make(chan struct{}, itemImageParallelism)
+	var wg sync.WaitGroup
+	for i, image := range images {
+		wg.Add(1)
+		go func(i int, image emby.ImageInfo) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				outcomes[i] = itemImageOutcome{errMsg: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, ctx.Err())}
+				return
+			}
+			defer func() { <-sem }()
+			data, ext, err := client.DownloadPath(ctx, image.DownloadPath)
+			if err != nil || len(data) == 0 {
+				if err == nil {
+					err = fmt.Errorf("empty image response")
+				}
+				outcomes[i] = itemImageOutcome{errMsg: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, err)}
+				return
+			}
+			rel := itemRelDir + "/" + imageFileName(image, ext)
+			file, err := storage.WriteBytes(filepath.Join(exportDir, filepath.FromSlash(rel)), data)
+			if err != nil {
+				outcomes[i] = itemImageOutcome{errMsg: fmt.Sprintf("%s[%d]: %v", image.ImageType, image.ImageIndex, err), alwaysRecord: true}
+				return
+			}
+			file.Type = image.ImageType
+			file.Index = image.ImageIndex
+			file.Path = rel
+			outcomes[i] = itemImageOutcome{file: file, ok: true}
+		}(i, image)
+	}
+	wg.Wait()
+
+	files := make([]storage.FileEntry, 0, len(outcomes))
+	errs := make([]storage.ErrorEntry, 0)
+	for _, outcome := range outcomes {
+		switch {
+		case outcome.ok:
+			files = append(files, outcome.file)
+		case outcome.alwaysRecord || authoritative:
+			errs = append(errs, storage.ErrorEntry{Scope: "item-image", ID: item.ID, Name: item.Name, Message: outcome.errMsg})
+		}
+	}
+	return files, errs
 }
 
 func (s *Service) enrichExportItem(ctx context.Context, client *emby.Client, item emby.Item, includeMediaInfo bool) (emby.Item, error) {
@@ -1939,6 +2048,10 @@ func mergeProviderIDs(a, b map[string]string) map[string]string {
 }
 
 func itemFingerprint(item emby.Item) string {
+	return itemFingerprintWithMediaInfo(item, mediaInfoFromItem(item))
+}
+
+func itemFingerprintWithMediaInfo(item emby.Item, mediaInfo *storage.MediaInfo) string {
 	raw := map[string]any{
 		"name":              item.Name,
 		"type":              item.Type,
@@ -1962,8 +2075,8 @@ func itemFingerprint(item emby.Item) string {
 		"imageTags":         sortedStringMap(item.ImageTags),
 		"backdropTags":      sortedStrings(item.BackdropImageTags),
 	}
-	if info := mediaInfoFromItem(item); info != nil {
-		raw["mediaInfoHash"] = info.Hash
+	if mediaInfo != nil {
+		raw["mediaInfoHash"] = mediaInfo.Hash
 	}
 	data, _ := json.Marshal(raw)
 	sum := sha256.Sum256(data)
@@ -2089,14 +2202,12 @@ func mediaStreamsFromSources(sources []map[string]any) []map[string]any {
 }
 
 func uniqueObjectSlice(values []map[string]any) []map[string]any {
-	seen := map[string]bool{}
+	seen := make(map[string]bool, len(values))
 	out := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		data, err := json.Marshal(value)
-		if err != nil {
-			continue
-		}
-		key := string(data)
+		// fmt renders maps with sorted keys, giving a deterministic identity
+		// for content deduplication without paying a JSON marshal per stream.
+		key := fmt.Sprintf("%v", value)
 		if seen[key] {
 			continue
 		}
@@ -3110,23 +3221,35 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 	if len(items) == 0 {
 		return results, nil
 	}
+	imageTypeSet := allowedImageTypes(req.ImageTypes)
 
 	taskCh := make(chan importItemTask)
-	resultCh := make(chan importItemResult, len(items))
+	resultCh := make(chan importItemResult)
 	workers := workerCount(len(items), concurrency)
+	var pool sync.WaitGroup
 	if req.DryRun {
 		j.Log("info", "开始验证项目匹配：%d 个，并发 %d，匹配超时 %s", len(items), workers, importMatchTimeout)
 	} else {
 		j.Log("info", "开始导入项目：%d 个，并发 %d，匹配超时 %s，元数据超时 %s，图片超时 %s，临时错误最多尝试 %d 次", len(items), workers, importMatchTimeout, itemMetadataTimeout, itemImageUploadTimeout, importRetryAttempts)
 	}
 	for i := 0; i < workers; i++ {
+		pool.Add(1)
 		go func() {
+			defer pool.Done()
 			for task := range taskCh {
-				match := s.importItem(ctx, client, cache, exportPath, task.Item, req)
-				resultCh <- importItemResult{Index: task.Index, Match: match}
+				match := s.importItem(ctx, client, cache, exportPath, task.Item, req, imageTypeSet)
+				select {
+				case resultCh <- importItemResult{Index: task.Index, Match: match}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
+	go func() {
+		pool.Wait()
+		close(resultCh)
+	}()
 
 	go func() {
 		defer close(taskCh)
@@ -3145,11 +3268,15 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 	done := 0
 	ticker := time.NewTicker(importHeartbeatInterval)
 	defer ticker.Stop()
-	for done < len(items) {
+loop:
+	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case result := <-resultCh:
+		case result, ok := <-resultCh:
+			if !ok {
+				break loop
+			}
 			done++
 			results[result.Index] = result
 			match := result.Match
@@ -3176,7 +3303,7 @@ func (s *Service) importItems(ctx context.Context, j *job.Job, client *emby.Clie
 	return results, nil
 }
 
-func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, entry storage.ItemEntry, req ImportRequest) ImportMatch {
+func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *importLookupCache, exportPath string, entry storage.ItemEntry, req ImportRequest, imageTypeSet map[string]bool) ImportMatch {
 	match := ImportMatch{StableKey: entry.StableKey, SourceName: entry.Name}
 	var target emby.Item
 	var candidates []emby.Item
@@ -3213,9 +3340,22 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 	match.Reason = reason
 	match.Strategy = reason
 	current := target
+	// Load info.json once and share it across the media-info plan and the
+	// metadata merge below; a broken package file must fail this item loudly
+	// instead of writing an almost-empty payload to the target server.
+	info, infoErr := readItemInfo(exportPath, entry)
+	if infoErr != nil {
+		match.Status = "failed"
+		match.Error = fmt.Sprintf("读取导出包元数据失败：%v", infoErr)
+		return match
+	}
 	if databaseMediaInfoEnabled(req) {
-		mediaPayload := packageMediaInfoPayload(exportPath, entry)
-		mergeItemMetadata(&current, entry, exportPath, false)
+		mediaPayload := packageMediaInfoPayload(exportPath, entry, info)
+		if _, err := mergeItemMetadata(&current, entry, exportPath, info, false); err != nil {
+			match.Status = "failed"
+			match.Error = err.Error()
+			return match
+		}
 		if len(mediaPayload) > 0 {
 			match.MediaInfoPlanned = 1
 		} else {
@@ -3227,7 +3367,7 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 		}
 		metadataResult := updateItemMetadata(ctx, client, target.ID, current, false, nil)
 		if !req.SkipImages {
-			importItemImages(ctx, client, exportPath, entry, req, target.ID, &match)
+			importItemImages(ctx, client, exportPath, entry, imageTypeSet, target.ID, &match)
 		}
 		if metadataResult.Err != nil {
 			match.Status = "failed"
@@ -3257,7 +3397,12 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 			}
 		}
 	}
-	mediaInfoIncluded := mergeItemMetadata(&current, entry, exportPath, req.ImportMediaInfo && targetMediaInfoReadable)
+	mediaInfoIncluded, mergeErr := mergeItemMetadata(&current, entry, exportPath, info, req.ImportMediaInfo && targetMediaInfoReadable)
+	if mergeErr != nil {
+		match.Status = "failed"
+		match.Error = mergeErr.Error()
+		return match
+	}
 	expectedMediaInfo := mediaInfoPayloadFromRaw(current.Raw)
 	if req.ImportMediaInfo {
 		switch {
@@ -3289,7 +3434,7 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 		match.MediaInfoError = metadataResult.MediaInfoError
 	}
 	if !req.SkipImages {
-		importItemImages(ctx, client, exportPath, entry, req, target.ID, &match)
+		importItemImages(ctx, client, exportPath, entry, imageTypeSet, target.ID, &match)
 	}
 	if metadataResult.Err != nil {
 		match.Status = "failed"
@@ -3300,8 +3445,7 @@ func (s *Service) importItem(ctx context.Context, client *emby.Client, cache *im
 	return match
 }
 
-func importItemImages(ctx context.Context, client *emby.Client, exportPath string, entry storage.ItemEntry, req ImportRequest, targetID string, match *ImportMatch) {
-	imageTypeSet := allowedImageTypes(req.ImageTypes)
+func importItemImages(ctx context.Context, client *emby.Client, exportPath string, entry storage.ItemEntry, imageTypeSet map[string]bool, targetID string, match *ImportMatch) {
 	for _, img := range entry.Images {
 		if len(imageTypeSet) > 0 && !imageTypeSet[strings.ToLower(img.Type)] {
 			continue
@@ -3329,20 +3473,34 @@ func databaseMediaInfoEnabled(req ImportRequest) bool {
 	return req.ImportMediaInfo && !strings.EqualFold(strings.TrimSpace(req.MediaInfoMode), "legacy-http")
 }
 
-func sameEmbyMinorSeries(source, target string) bool {
-	series := func(value string) string {
-		parts := strings.Split(strings.TrimSpace(value), ".")
-		if len(parts) < 3 {
-			return ""
+// dbVersionSeriesEnv lets operators declare additional Emby series that share
+// the library.db schema (e.g. "4.8.11,4.9.5,4.9.6"); it mirrors the same
+// variable read by internal/embydb.
+const dbVersionSeriesEnv = "EMBY_MIGRATOR_DB_VERSIONS"
+
+var dbVersionSeriesSet = loadDBVersionSeries()
+
+func loadDBVersionSeries() map[string]bool {
+	set := map[string]bool{"4.8.11": true, "4.9.5": true}
+	for _, entry := range strings.Split(os.Getenv(dbVersionSeriesEnv), ",") {
+		if series := versionSeries(entry); series != "" {
+			set[series] = true
 		}
-		candidate := strings.Join(parts[:3], ".")
-		if candidate != "4.8.11" && candidate != "4.9.5" {
-			return ""
-		}
-		return candidate
 	}
-	sourceSeries := series(source)
-	return sourceSeries != "" && sourceSeries == series(target)
+	return set
+}
+
+func versionSeries(value string) string {
+	parts := strings.Split(strings.TrimSpace(value), ".")
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.Join(parts[:3], ".")
+}
+
+func sameEmbyMinorSeries(source, target string) bool {
+	sourceSeries := versionSeries(source)
+	return dbVersionSeriesSet[sourceSeries] && sourceSeries == versionSeries(target)
 }
 
 type metadataUpdateResult struct {
@@ -3435,12 +3593,23 @@ func mediaInfoPayloadFromRaw(raw map[string]any) map[string]any {
 
 func mediaInfoPayloadContains(actual, expected map[string]any) bool {
 	for key, expectedValue := range expected {
-		actualValue, ok := mapValueFold(actual, key)
+		actualValue, ok := lookupValueFold(actual, key)
 		if !ok || !mediaInfoValueContains(actualValue, expectedValue) {
 			return false
 		}
 	}
 	return len(expected) > 0
+}
+
+// lookupValueFold is a single case-insensitive lookup for small, cold maps;
+// hot paths fold keys once via mediaInfoMapContains instead.
+func lookupValueFold(values map[string]any, key string) (any, bool) {
+	for candidate, value := range values {
+		if strings.EqualFold(candidate, key) {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 func mediaInfoValueContains(actual, expected any) bool {
@@ -3473,22 +3642,22 @@ func mediaInfoValueContains(actual, expected any) bool {
 }
 
 func mediaInfoMapContains(actual, expected map[string]any) bool {
+	if actual == nil {
+		return len(expected) == 0
+	}
+	// This comparison recurses over every expected key; fold the actual map's
+	// keys once instead of an EqualFold scan per lookup.
+	folded := make(map[string]any, len(actual))
+	for key, value := range actual {
+		folded[strings.ToLower(key)] = value
+	}
 	for key, expectedValue := range expected {
-		actualValue, ok := mapValueFold(actual, key)
+		actualValue, ok := folded[strings.ToLower(key)]
 		if !ok || !mediaInfoValueContains(actualValue, expectedValue) {
 			return false
 		}
 	}
 	return true
-}
-
-func mapValueFold(values map[string]any, key string) (any, bool) {
-	for candidate, value := range values {
-		if strings.EqualFold(candidate, key) {
-			return value, true
-		}
-	}
-	return nil, false
 }
 
 func mediaInfoScalarEqual(actual, expected any) bool {
@@ -3611,7 +3780,9 @@ func retryWithTimeout(ctx context.Context, attempts int, timeout time.Duration, 
 		if attempt == attempts || !isTransientImportError(err) {
 			break
 		}
-		timer := time.NewTimer(time.Duration(attempt) * 500 * time.Millisecond)
+		// Jitter spreads concurrent retry storms instead of syncing them.
+		delay := time.Duration(attempt)*500*time.Millisecond + rand.N(time.Duration(attempt)*250*time.Millisecond)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
@@ -3676,14 +3847,28 @@ func allowedImageTypes(imageTypes []string) map[string]bool {
 	return allowed
 }
 
-func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath string, importMediaInfo ...bool) bool {
-	var info storage.ItemInfo
+// readItemInfo loads and caches-friendly reads one item's info.json from the
+// export package; callers that already loaded it pass the value through
+// instead of re-reading and re-parsing the (large) file.
+func readItemInfo(exportPath string, entry storage.ItemEntry) (*storage.ItemInfo, error) {
 	infoPath, err := safePackagePath(exportPath, entry.InfoPath)
 	if err != nil {
-		return false
+		return nil, fmt.Errorf("export package info path %q: %w", entry.InfoPath, err)
 	}
+	var info storage.ItemInfo
 	if err := storage.ReadJSON(infoPath, &info); err != nil {
-		return false
+		return nil, fmt.Errorf("read %s: %w", entry.InfoPath, err)
+	}
+	return &info, nil
+}
+
+func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath string, info *storage.ItemInfo, importMediaInfo ...bool) (bool, error) {
+	if info == nil {
+		loaded, err := readItemInfo(exportPath, entry)
+		if err != nil {
+			return false, err
+		}
+		info = loaded
 	}
 	source := info.Item
 	payload := map[string]any{}
@@ -3742,7 +3927,7 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 		}
 	}
 	current.Raw = payload
-	return mediaInfoIncluded
+	return mediaInfoIncluded, nil
 }
 
 func sanitizedMediaInfoPayload(source emby.Item, entry storage.ItemEntry, exportPath string) map[string]any {
@@ -3791,23 +3976,15 @@ func sanitizedMediaInfoPayload(source emby.Item, entry storage.ItemEntry, export
 	return out
 }
 
-func sanitizeMediaSources(values []map[string]any) []map[string]any {
-	allowed := stringSet(
+// The allowed-key sets below are fixed schemas; build them once instead of
+// per call, which used to reallocate 40+ entry maps for every media stream.
+var (
+	mediaSourceAllowedKeys = stringSet(
 		"Protocol", "Container", "Size", "Name", "RunTimeTicks", "Bitrate",
 		"VideoType", "IsoType", "Video3DFormat", "DefaultAudioStreamIndex",
 		"DefaultSubtitleStreamIndex", "MediaStreams", "Formats",
 	)
-	out := make([]map[string]any, 0, len(values))
-	for _, value := range values {
-		if sanitized := sanitizeMediaInfoMap(value, allowed, true); len(sanitized) > 0 {
-			out = append(out, sanitized)
-		}
-	}
-	return out
-}
-
-func sanitizeMediaStreams(values []map[string]any) []map[string]any {
-	allowed := stringSet(
+	mediaStreamAllowedKeys = stringSet(
 		"Codec", "Language", "TimeBase", "CodecTimeBase", "Title", "VideoRange",
 		"VideoRangeType", "VideoDoViTitle", "DisplayTitle", "NalLengthSize",
 		"IsInterlaced", "IsAVC", "ChannelLayout", "BitRate", "BitDepth", "RefFrames",
@@ -3819,9 +3996,23 @@ func sanitizeMediaStreams(values []map[string]any) []map[string]any {
 		"RpuPresentFlag", "ElPresentFlag", "BlPresentFlag", "DvBlSignalCompatibilityId",
 		"Rotation", "Comment",
 	)
+	chapterAllowedKeys = stringSet("StartPositionTicks", "Name", "ImageTag", "MarkerType", "ChapterIndex")
+)
+
+func sanitizeMediaSources(values []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		if sanitized := sanitizeMediaInfoMap(value, allowed, false); len(sanitized) > 0 {
+		if sanitized := sanitizeMediaInfoMap(value, mediaSourceAllowedKeys, true); len(sanitized) > 0 {
+			out = append(out, sanitized)
+		}
+	}
+	return out
+}
+
+func sanitizeMediaStreams(values []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if sanitized := sanitizeMediaInfoMap(value, mediaStreamAllowedKeys, false); len(sanitized) > 0 {
 			out = append(out, sanitized)
 		}
 	}
@@ -3829,10 +4020,9 @@ func sanitizeMediaStreams(values []map[string]any) []map[string]any {
 }
 
 func sanitizeChapters(values []map[string]any) []map[string]any {
-	allowed := stringSet("StartPositionTicks", "Name", "ImageTag", "MarkerType", "ChapterIndex")
 	out := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		if sanitized := sanitizeMediaInfoMap(value, allowed, false); len(sanitized) > 0 {
+		if sanitized := sanitizeMediaInfoMap(value, chapterAllowedKeys, false); len(sanitized) > 0 {
 			out = append(out, sanitized)
 		}
 	}
@@ -3980,14 +4170,26 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 	j.Log("info", "开始导入人物头像：%d 个，并发 %d，单次超时 %s，临时错误最多尝试 %d 次", len(tasks), workers, personImageUploadTimeout, importRetryAttempts)
 
 	taskCh := make(chan personImageTask)
-	resultCh := make(chan personImageResult, len(tasks))
+	resultCh := make(chan personImageResult)
+	var pool sync.WaitGroup
 	for i := 0; i < workers; i++ {
+		pool.Add(1)
 		go func() {
+			defer pool.Done()
 			for task := range taskCh {
-				resultCh <- s.importPersonImage(ctx, client, cache, exportPath, task)
+				result := s.importPersonImage(ctx, client, cache, exportPath, task)
+				select {
+				case resultCh <- result:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
+	go func() {
+		pool.Wait()
+		close(resultCh)
+	}()
 
 	go func() {
 		defer close(taskCh)
@@ -4007,11 +4209,15 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 	detailedFailures := 0
 	ticker := time.NewTicker(importHeartbeatInterval)
 	defer ticker.Stop()
-	for done < len(tasks) {
+loop:
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case result := <-resultCh:
+		case result, ok := <-resultCh:
+			if !ok {
+				break loop
+			}
 			done++
 			if result.Err != nil {
 				report.Summary.PeopleImagesFailed++

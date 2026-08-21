@@ -73,7 +73,7 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 		return ApplyResult{}, fmt.Errorf("media database plan has no items")
 	}
 
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath)+"?mode=rw&_pragma=busy_timeout(1000)")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath)+"?mode=rw&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("open Emby database: %w", err)
 	}
@@ -124,16 +124,12 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 		now = options.Now()
 	}
 	backupPath := databasePath + ".emby-migrator-" + now.Format("20060102-150405.000000000") + ".bak"
-	if err := backupDatabase(conn, backupPath, info.Mode().Perm()); err != nil {
+	if err := backupDatabase(ctx, conn, backupPath, info.Mode().Perm()); err != nil {
 		return ApplyResult{}, fmt.Errorf("backup Emby database: %w", err)
 	}
 	result := ApplyResult{
 		DatabasePath: databasePath, BackupPath: backupPath, TargetServerID: strings.TrimSpace(options.TargetServerID),
 		TargetBindingDigest: expectedDigest, SchemaIdentity: schemaIdentity,
-	}
-	result.BackupsPruned, err = cleanupDatabaseBackups(databasePath, backupPath, 5, os.Remove)
-	if err != nil {
-		result.BackupCleanupWarning = err.Error()
 	}
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return ApplyResult{}, fmt.Errorf("target Emby database changed or became locked after backup; keep Emby stopped and retry: %w", err)
@@ -145,8 +141,14 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 		}
 	}()
 
+	stmts, err := prepareApplyStatements(ctx, conn)
+	if err != nil {
+		return ApplyResult{}, fmt.Errorf("prepare Emby database statements: %w", err)
+	}
+	defer stmts.close()
+
 	for _, item := range options.Items {
-		applied, streams, chapters, err := applyItem(ctx, conn, item, options.Overwrite)
+		applied, streams, chapters, err := applyItem(ctx, stmts, item, options.Overwrite)
 		if err != nil {
 			return ApplyResult{}, err
 		}
@@ -169,36 +171,135 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 		return ApplyResult{}, fmt.Errorf("commit Emby database update: %w", err)
 	}
 	committed = true
+	// Prune old backups only after the write transaction has committed, so a
+	// failed apply keeps the full retention window intact.
+	result.BackupsPruned, err = cleanupDatabaseBackups(databasePath, backupPath, 5, os.Remove)
+	if err != nil {
+		result.BackupCleanupWarning = err.Error()
+	}
 	return result, nil
+}
+
+var streamInsertSQL = `INSERT INTO MediaStreams2 (
+	ItemId, StreamIndex, StreamType, Codec, Language, ChannelLayout, Profile, AspectRatio, Path,
+	IsInterlaced, BitRate, Channels, SampleRate, IsDefault, IsForced, IsHearingImpaired, IsExternal,
+	Height, Width, AverageFrameRate, RealFrameRate, Level, PixelFormat, BitDepth, IsAnamorphic,
+	RefFrames, Rotation, CodecTag, Comment, NalLengthSize, Title, TimeBase, ColorPrimaries, ColorSpace,
+	ColorTransfer, Extradata, AttachmentSize, MimeType, ExtendedVideoType, ExtendedVideoSubtype
+) VALUES (` + strings.TrimRight(strings.Repeat("?,", 40), ",") + `)`
+
+type applyStatements struct {
+	findItem       *sql.Stmt
+	countStreams   *sql.Stmt
+	deleteStreams  *sql.Stmt
+	deleteChapters *sql.Stmt
+	insertStream   *sql.Stmt
+	insertChapter  *sql.Stmt
+	updateItem     *sql.Stmt
+}
+
+func prepareApplyStatements(ctx context.Context, conn *sql.Conn) (*applyStatements, error) {
+	stmts := &applyStatements{}
+	prepare := func(dst **sql.Stmt, query string) error {
+		stmt, err := conn.PrepareContext(ctx, query)
+		if err != nil {
+			return err
+		}
+		*dst = stmt
+		return nil
+	}
+	if err := prepare(&stmts.findItem, "SELECT Name FROM MediaItems WHERE Id=?"); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.countStreams, "SELECT COUNT(*) FROM MediaStreams2 WHERE ItemId=?"); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.deleteStreams, "DELETE FROM MediaStreams2 WHERE ItemId=?"); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.deleteChapters, "DELETE FROM Chapters3 WHERE ItemId=?"); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.insertStream, streamInsertSQL); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.insertChapter, `INSERT INTO Chapters3 (ItemId, ChapterIndex, StartPositionTicks, Name, ImagePath, ImageDateModified, MarkerType) VALUES (?, ?, ?, ?, NULL, ?, ?)`); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.updateItem, `UPDATE MediaItems SET RunTimeTicks=?, TotalBitrate=?, Width=?, Height=?, Size=?, Container=? WHERE Id=?`); err != nil {
+		return nil, err
+	}
+	return stmts, nil
+}
+
+func (s *applyStatements) close() {
+	for _, stmt := range []*sql.Stmt{s.findItem, s.countStreams, s.deleteStreams, s.deleteChapters, s.insertStream, s.insertChapter, s.updateItem} {
+		if stmt != nil {
+			_ = stmt.Close()
+		}
+	}
 }
 
 func validateVersionPair(source, target string) error {
 	sourceSeries := supportedSeries(source)
 	targetSeries := supportedSeries(target)
 	if sourceSeries == "" || targetSeries == "" || sourceSeries != targetSeries {
-		return fmt.Errorf("media database restore only supports 4.8.11.x -> 4.8.11.x or 4.9.5.x -> 4.9.5.x: source %q, target %q", source, target)
+		return fmt.Errorf("media database restore only supports %s: source %q, target %q", supportedSeriesSummary(), source, target)
 	}
 	return nil
 }
 
-func supportedSeries(version string) string {
+// dbVersionAllowlistEnv lets operators declare additional Emby series known
+// to share the library.db schema (e.g. "4.8.11,4.9.5,4.9.6").
+const dbVersionAllowlistEnv = "EMBY_MIGRATOR_DB_VERSIONS"
+
+var supportedSeriesSet = loadSupportedSeries()
+
+func loadSupportedSeries() map[string]bool {
+	allowlist := map[string]bool{"4.8.11": true, "4.9.5": true}
+	for _, entry := range strings.Split(os.Getenv(dbVersionAllowlistEnv), ",") {
+		if series := seriesOf(entry); series != "" {
+			allowlist[series] = true
+		}
+	}
+	return allowlist
+}
+
+func seriesOf(version string) string {
 	parts := strings.Split(strings.TrimSpace(version), ".")
 	if len(parts) < 3 {
 		return ""
 	}
-	series := strings.Join(parts[:3], ".")
-	if series == "4.8.11" || series == "4.9.5" {
+	return strings.Join(parts[:3], ".")
+}
+
+func supportedSeries(version string) string {
+	series := seriesOf(version)
+	if supportedSeriesSet[series] {
 		return series
 	}
 	return ""
 }
 
-func applyItem(ctx context.Context, conn *sql.Conn, item ItemPatch, overwrite bool) (bool, int, int, error) {
+func supportedSeriesSummary() string {
+	series := make([]string, 0, len(supportedSeriesSet))
+	for entry := range supportedSeriesSet {
+		series = append(series, entry)
+	}
+	sort.Strings(series)
+	parts := make([]string, 0, len(series))
+	for _, entry := range series {
+		parts = append(parts, entry+".x -> "+entry+".x")
+	}
+	return strings.Join(parts, " or ")
+}
+
+func applyItem(ctx context.Context, stmts *applyStatements, item ItemPatch, overwrite bool) (bool, int, int, error) {
 	if item.TargetItemID <= 0 {
 		return false, 0, 0, fmt.Errorf("invalid target item id for %s", item.StableKey)
 	}
 	var targetName sql.NullString
-	if err := conn.QueryRowContext(ctx, "SELECT Name FROM MediaItems WHERE Id=?", item.TargetItemID).Scan(&targetName); err != nil {
+	if err := stmts.findItem.QueryRowContext(ctx, item.TargetItemID).Scan(&targetName); err != nil {
 		if err == sql.ErrNoRows {
 			return false, 0, 0, fmt.Errorf("target item %d does not exist in Emby database", item.TargetItemID)
 		}
@@ -208,7 +309,7 @@ func applyItem(ctx context.Context, conn *sql.Conn, item ItemPatch, overwrite bo
 		return false, 0, 0, fmt.Errorf("target item %d name mismatch: plan %q, database %q; verify the selected target database", item.TargetItemID, expected, targetName.String)
 	}
 	var existingStreams int
-	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM MediaStreams2 WHERE ItemId=?", item.TargetItemID).Scan(&existingStreams); err != nil {
+	if err := stmts.countStreams.QueryRowContext(ctx, item.TargetItemID).Scan(&existingStreams); err != nil {
 		return false, 0, 0, err
 	}
 	if existingStreams > 0 && !overwrite {
@@ -217,78 +318,95 @@ func applyItem(ctx context.Context, conn *sql.Conn, item ItemPatch, overwrite bo
 	if len(item.MediaStreams) == 0 {
 		return false, 0, 0, fmt.Errorf("item %d has no media streams in plan", item.TargetItemID)
 	}
-	if _, err := conn.ExecContext(ctx, "DELETE FROM MediaStreams2 WHERE ItemId=?", item.TargetItemID); err != nil {
+	if _, err := stmts.deleteStreams.ExecContext(ctx, item.TargetItemID); err != nil {
 		return false, 0, 0, err
 	}
-	if _, err := conn.ExecContext(ctx, "DELETE FROM Chapters3 WHERE ItemId=?", item.TargetItemID); err != nil {
+	if _, err := stmts.deleteChapters.ExecContext(ctx, item.TargetItemID); err != nil {
 		return false, 0, 0, err
 	}
 
-	streamSQL := `INSERT INTO MediaStreams2 (
-		ItemId, StreamIndex, StreamType, Codec, Language, ChannelLayout, Profile, AspectRatio, Path,
-		IsInterlaced, BitRate, Channels, SampleRate, IsDefault, IsForced, IsHearingImpaired, IsExternal,
-		Height, Width, AverageFrameRate, RealFrameRate, Level, PixelFormat, BitDepth, IsAnamorphic,
-		RefFrames, Rotation, CodecTag, Comment, NalLengthSize, Title, TimeBase, ColorPrimaries, ColorSpace,
-		ColorTransfer, Extradata, AttachmentSize, MimeType, ExtendedVideoType, ExtendedVideoSubtype
-	) VALUES (` + strings.TrimRight(strings.Repeat("?,", 40), ",") + `)`
-	for index, stream := range item.MediaStreams {
-		streamIndex, ok := integerValue(valueFold(stream, "Index"))
+	// Plan payloads come from JSON with arbitrary key casing; fold each map's
+	// keys once so the per-column lookups below stay O(1).
+	foldedStreams := foldKeyMaps(item.MediaStreams)
+	for index, stream := range foldedStreams {
+		streamIndex, ok := integerValue(pick(stream, "index"))
 		if !ok {
 			streamIndex = int64(index)
 		}
-		streamType, err := streamTypeValue(valueFold(stream, "Type"))
+		streamType, err := streamTypeValue(pick(stream, "type"))
 		if err != nil {
 			return false, 0, 0, fmt.Errorf("item %d stream %d: %w", item.TargetItemID, index, err)
 		}
 		values := []any{
-			item.TargetItemID, streamIndex, streamType, valueFold(stream, "Codec"), valueFold(stream, "Language"),
-			valueFold(stream, "ChannelLayout"), valueFold(stream, "Profile"), valueFold(stream, "AspectRatio"), nil,
-			boolInteger(valueFold(stream, "IsInterlaced")), valueFold(stream, "BitRate"), valueFold(stream, "Channels"),
-			valueFold(stream, "SampleRate"), boolInteger(valueFold(stream, "IsDefault")), boolInteger(valueFold(stream, "IsForced")),
-			boolInteger(valueFold(stream, "IsHearingImpaired")), boolInteger(valueFold(stream, "IsExternal")),
-			valueFold(stream, "Width"), valueFold(stream, "Height"), valueFold(stream, "AverageFrameRate"),
-			valueFold(stream, "RealFrameRate"), valueFold(stream, "Level"), valueFold(stream, "PixelFormat"),
-			valueFold(stream, "BitDepth"), boolInteger(valueFold(stream, "IsAnamorphic")), valueFold(stream, "RefFrames"),
-			valueFold(stream, "Rotation"), valueFold(stream, "CodecTag"), valueFold(stream, "Comment"),
-			valueFold(stream, "NalLengthSize"), valueFold(stream, "Title"), valueFold(stream, "TimeBase"),
-			valueFold(stream, "ColorPrimaries"), valueFold(stream, "ColorSpace"), valueFold(stream, "ColorTransfer"),
-			nil, nil, valueFold(stream, "MimeType"), 0, 0,
+			item.TargetItemID, streamIndex, streamType, pick(stream, "codec"), pick(stream, "language"),
+			pick(stream, "channellayout"), pick(stream, "profile"), pick(stream, "aspectratio"), nil,
+			boolInteger(pick(stream, "isinterlaced")), pick(stream, "bitrate"), pick(stream, "channels"),
+			pick(stream, "samplerate"), boolInteger(pick(stream, "isdefault")), boolInteger(pick(stream, "isforced")),
+			boolInteger(pick(stream, "ishearingimpaired")), boolInteger(pick(stream, "isexternal")),
+			pick(stream, "width"), pick(stream, "height"), pick(stream, "averageframerate"),
+			pick(stream, "realframerate"), pick(stream, "level"), pick(stream, "pixelformat"),
+			pick(stream, "bitdepth"), boolInteger(pick(stream, "isanamorphic")), pick(stream, "refframes"),
+			pick(stream, "rotation"), pick(stream, "codectag"), pick(stream, "comment"),
+			pick(stream, "nallengthsize"), pick(stream, "title"), pick(stream, "timebase"),
+			pick(stream, "colorprimaries"), pick(stream, "colorspace"), pick(stream, "colortransfer"),
+			nil, nil, pick(stream, "mimetype"), 0, 0,
 		}
-		if _, err := conn.ExecContext(ctx, streamSQL, values...); err != nil {
+		if _, err := stmts.insertStream.ExecContext(ctx, values...); err != nil {
 			return false, 0, 0, fmt.Errorf("write target item %d stream %d: %w", item.TargetItemID, index, err)
 		}
 	}
 
-	for index, chapter := range item.Chapters {
-		chapterIndex, ok := integerValue(valueFold(chapter, "ChapterIndex"))
+	for index, raw := range item.Chapters {
+		chapter := foldKeys(raw)
+		chapterIndex, ok := integerValue(pick(chapter, "chapterindex"))
 		if !ok {
 			chapterIndex = int64(index)
 		}
-		start, _ := integerValue(valueFold(chapter, "StartPositionTicks"))
-		marker := markerTypeValue(valueFold(chapter, "MarkerType"))
-		if _, err := conn.ExecContext(ctx, `INSERT INTO Chapters3 (ItemId, ChapterIndex, StartPositionTicks, Name, ImagePath, ImageDateModified, MarkerType) VALUES (?, ?, ?, ?, NULL, ?, ?)`,
-			item.TargetItemID, chapterIndex, start, valueFold(chapter, "Name"), emptyDateModified, marker); err != nil {
+		start, _ := integerValue(pick(chapter, "startpositionticks"))
+		marker := markerTypeValue(pick(chapter, "markertype"))
+		if _, err := stmts.insertChapter.ExecContext(ctx,
+			item.TargetItemID, chapterIndex, start, pick(chapter, "name"), emptyDateModified, marker); err != nil {
 			return false, 0, 0, fmt.Errorf("write target item %d chapter %d: %w", item.TargetItemID, index, err)
 		}
 	}
 
-	width, height := primaryVideoDimensions(item.MediaStreams)
-	_, err := conn.ExecContext(ctx, `UPDATE MediaItems SET RunTimeTicks=?, TotalBitrate=?, Width=?, Height=?, Size=?, Container=? WHERE Id=?`,
-		valueFold(item.MediaSource, "RunTimeTicks"), firstValue(item.MediaSource, "Bitrate", "BitRate"), width, height,
-		valueFold(item.MediaSource, "Size"), valueFold(item.MediaSource, "Container"), item.TargetItemID)
-	if err != nil {
+	width, height := primaryVideoDimensions(foldedStreams)
+	source := foldKeys(item.MediaSource)
+	if _, err := stmts.updateItem.ExecContext(ctx,
+		pick(source, "runtimeticks"), firstValue(source, "bitrate"), width, height,
+		pick(source, "size"), pick(source, "container"), item.TargetItemID); err != nil {
 		return false, 0, 0, fmt.Errorf("update target item %d media summary: %w", item.TargetItemID, err)
 	}
 	return true, len(item.MediaStreams), len(item.Chapters), nil
 }
 
-func valueFold(values map[string]any, key string) any {
-	for candidate, value := range values {
-		if strings.EqualFold(strings.TrimSpace(candidate), key) {
-			return normalizeSQLiteValue(value)
-		}
+// foldKeys returns a copy of values with keys lowercased and trimmed so that
+// case-insensitive lookups become a single map access.
+func foldKeys(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
 	}
-	return nil
+	folded := make(map[string]any, len(values))
+	for key, value := range values {
+		folded[strings.ToLower(strings.TrimSpace(key))] = value
+	}
+	return folded
+}
+
+func foldKeyMaps(values []map[string]any) []map[string]any {
+	folded := make([]map[string]any, len(values))
+	for i, value := range values {
+		folded[i] = foldKeys(value)
+	}
+	return folded
+}
+
+// pick reads a value from a map produced by foldKeys; key must be lowercase.
+func pick(folded map[string]any, key string) any {
+	if folded == nil {
+		return nil
+	}
+	return normalizeSQLiteValue(folded[key])
 }
 
 func equivalentTargetName(databaseName, planName string) bool {
@@ -311,9 +429,9 @@ func portableTargetName(value string) string {
 	return normalized.String()
 }
 
-func firstValue(values map[string]any, keys ...string) any {
+func firstValue(folded map[string]any, keys ...string) any {
 	for _, key := range keys {
-		if value := valueFold(values, key); value != nil {
+		if value := pick(folded, key); value != nil {
 			return value
 		}
 	}
@@ -416,16 +534,16 @@ func markerTypeValue(value any) int64 {
 	}
 }
 
-func primaryVideoDimensions(streams []map[string]any) (any, any) {
+func primaryVideoDimensions(foldedStreams []map[string]any) (any, any) {
 	var best map[string]any
 	var bestPixels int64
-	for _, stream := range streams {
-		typ, err := streamTypeValue(valueFold(stream, "Type"))
+	for _, stream := range foldedStreams {
+		typ, err := streamTypeValue(pick(stream, "type"))
 		if err != nil || typ != 2 {
 			continue
 		}
-		width, _ := integerValue(valueFold(stream, "Width"))
-		height, _ := integerValue(valueFold(stream, "Height"))
+		width, _ := integerValue(pick(stream, "width"))
+		height, _ := integerValue(pick(stream, "height"))
 		if width*height >= bestPixels {
 			best = stream
 			bestPixels = width * height
@@ -434,10 +552,14 @@ func primaryVideoDimensions(streams []map[string]any) (any, any) {
 	if best == nil {
 		return nil, nil
 	}
-	return valueFold(best, "Width"), valueFold(best, "Height")
+	return pick(best, "width"), pick(best, "height")
 }
 
-func backupDatabase(conn *sql.Conn, target string, mode os.FileMode) error {
+// backupStepPages keeps each online-backup step bounded so cancellation is
+// observed mid-copy instead of only between whole databases.
+const backupStepPages = 2048
+
+func backupDatabase(ctx context.Context, conn *sql.Conn, target string, mode os.FileMode) error {
 	if _, err := os.Stat(target); err == nil {
 		return fmt.Errorf("backup already exists: %s", target)
 	} else if !os.IsNotExist(err) {
@@ -455,9 +577,16 @@ func backupDatabase(conn *sql.Conn, target string, mode os.FileMode) error {
 		if err != nil {
 			return err
 		}
-		for more := true; more; {
-			more, err = backup.Step(-1)
+		for {
+			remaining, err := backup.Step(backupStepPages)
 			if err != nil {
+				_ = backup.Finish()
+				return err
+			}
+			if !remaining {
+				break
+			}
+			if err := ctx.Err(); err != nil {
 				_ = backup.Finish()
 				return err
 			}

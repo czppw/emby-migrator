@@ -1703,7 +1703,9 @@ func TestMergeItemMetadataBuildsPortablePayloadWithoutOldInternalIDs(t *testing.
 		Name: "Target Movie",
 		Raw:  map[string]any{"Source": "Library"},
 	}
-	mergeItemMetadata(&current, storage.ItemEntry{Name: "Source Movie", InfoPath: infoRel}, exportPath)
+	if _, err := mergeItemMetadata(&current, storage.ItemEntry{Name: "Source Movie", InfoPath: infoRel}, exportPath, nil); err != nil {
+		t.Fatalf("mergeItemMetadata returned error: %v", err)
+	}
 
 	if current.Raw["Id"] != "target-id" {
 		t.Fatalf("payload should keep target id, got %#v", current.Raw)
@@ -1762,7 +1764,10 @@ func TestMergeItemMetadataIncludesSanitizedMediaTechnicalFields(t *testing.T) {
 		Name: "Target Movie",
 		Raw:  map[string]any{"Source": "Library", "ParentId": "target-parent"},
 	}
-	included := mergeItemMetadata(&current, storage.ItemEntry{Name: "Raw Media Fixture", InfoPath: infoRel, RawPath: rawRel}, exportPath, true)
+	included, err := mergeItemMetadata(&current, storage.ItemEntry{Name: "Raw Media Fixture", InfoPath: infoRel, RawPath: rawRel}, exportPath, nil, true)
+	if err != nil {
+		t.Fatalf("mergeItemMetadata returned error: %v", err)
+	}
 	if !included {
 		t.Fatalf("mergeItemMetadata should include media technical fields")
 	}
@@ -1867,7 +1872,7 @@ func TestImportItemFallsBackAfterMediaTechnicalPayload400AndStillUpdates(t *test
 		Type:     "Movie",
 		InfoPath: infoRel,
 		RawPath:  rawRel,
-	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http"})
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http"}, nil)
 	if match.Status != "updated" || match.Error != "" {
 		t.Fatalf("media info fallback should still update metadata, got %#v", match)
 	}
@@ -1912,7 +1917,7 @@ func TestImportItemVerifiesPersistedMediaTechnicalFields(t *testing.T) {
 
 	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
-	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true}, nil)
 	if match.Status != "updated" || match.MediaInfoUpdated != 1 || match.MediaInfoFailed != 0 {
 		t.Fatalf("persisted media info should verify successfully: %#v", match)
 	}
@@ -1945,7 +1950,7 @@ func TestImportDisabledNeverPostsMediaTechnicalFields(t *testing.T) {
 	client.HTTPClient = server.Client()
 	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
-	}, ImportRequest{SkipImages: true})
+	}, ImportRequest{SkipImages: true}, nil)
 	if match.Status != "updated" {
 		t.Fatalf("metadata-only import failed: %#v", match)
 	}
@@ -1981,7 +1986,7 @@ func TestImportItemReportsSilentMediaInfoDropInsteadOfFalseSuccess(t *testing.T)
 
 	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
-	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true}, nil)
 	if match.Status != "updated" || match.MediaInfoUpdated != 0 || match.MediaInfoFailed != 1 || !match.MediaInfoDegraded {
 		t.Fatalf("silent drop should be reported as degraded, not success: %#v", match)
 	}
@@ -2020,7 +2025,7 @@ func TestImportItemDoesNotOverwriteCompleteTargetMediaInfo(t *testing.T) {
 
 	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
-	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true}, nil)
 	if match.Status != "updated" || match.MediaInfoSkipped != 1 || match.MediaInfoUpdated != 0 {
 		t.Fatalf("complete target media info should be preserved: %#v", match)
 	}
@@ -2060,7 +2065,7 @@ func TestImportItemDoesNotWriteMediaInfoWhenTargetDetailUnavailable(t *testing.T
 
 	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
-	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true}, nil)
 	if match.Status != "updated" || match.MediaInfoFailed != 1 || !match.MediaInfoDegraded || match.MediaInfoError == "" {
 		t.Fatalf("unreadable target media info should degrade safely: %#v", match)
 	}
@@ -2144,7 +2149,7 @@ func TestImportItemFallsBackAfterMediaTechnicalPayload500(t *testing.T) {
 
 	match := NewService(exportPath).importItem(context.Background(), client, newImportLookupCache(), exportPath, storage.ItemEntry{
 		Name: "Raw Media Fixture", Type: "Movie", InfoPath: infoRel, RawPath: rawRel,
-	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true})
+	}, ImportRequest{ImportMediaInfo: true, MediaInfoMode: "legacy-http", SkipImages: true}, nil)
 	if match.Status != "updated" || match.MediaInfoFailed != 1 || match.Error != "" {
 		t.Fatalf("HTTP 500 media payload should degrade to metadata-only update: %#v", match)
 	}
@@ -2227,7 +2232,7 @@ func TestImportItemStillUploadsImagesWhenMetadataUpdateFails(t *testing.T) {
 		Type:     "Movie",
 		InfoPath: infoRel,
 		Images:   []storage.FileEntry{{Type: "Primary", Path: imageRel}},
-	}, ImportRequest{ImageTypes: []string{"Primary"}})
+	}, ImportRequest{ImageTypes: []string{"Primary"}}, nil)
 	if match.Status != "failed" || match.Error == "" {
 		t.Fatalf("metadata failure should be reported, got %#v", match)
 	}
@@ -2292,7 +2297,7 @@ func TestImportItemFallsBackToMinimalMetadataPayloadOnSourceNullError(t *testing
 		Name:     "Episode With Strict Payload",
 		Type:     "Episode",
 		InfoPath: infoRel,
-	}, ImportRequest{})
+	}, ImportRequest{}, nil)
 	if match.Status != "updated" || match.Error != "" {
 		t.Fatalf("fallback should make metadata update succeed, got %#v", match)
 	}
@@ -2347,7 +2352,7 @@ func TestImportItemUsesTargetLibraryIDsForMatchSearch(t *testing.T) {
 		Type:        "Movie",
 		InfoPath:    infoRel,
 		ProviderIDs: map[string]string{"Tmdb": "123"},
-	}, ImportRequest{TargetLibraryIDs: []string{"lib-target"}})
+	}, ImportRequest{TargetLibraryIDs: []string{"lib-target"}}, nil)
 	if match.Status != "updated" || match.TargetID != "target-id" || match.Error != "" {
 		t.Fatalf("importItem did not match/update scoped target: %#v", match)
 	}
@@ -2398,7 +2403,7 @@ func TestImportItemUsesLegacyLibraryIDsForMatchSearch(t *testing.T) {
 		Type:        "Movie",
 		InfoPath:    infoRel,
 		ProviderIDs: map[string]string{"Tmdb": "456"},
-	}, ImportRequest{LibraryIDs: []string{"legacy-lib"}})
+	}, ImportRequest{LibraryIDs: []string{"legacy-lib"}}, nil)
 	if match.Status != "updated" || match.TargetID != "target-id" || match.Error != "" {
 		t.Fatalf("importItem did not match/update legacy scoped target: %#v", match)
 	}

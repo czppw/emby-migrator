@@ -49,6 +49,9 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	// Close open SSE log streams the moment shutdown starts so srv.Shutdown
+	// is not blocked by a browser holding the event stream open.
+	srv.RegisterOnShutdown(handler.Shutdown)
 
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -77,6 +80,15 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "shutdown failed: %v\n", err)
+		os.Exit(1)
+	}
+	// Cancel running jobs and wait for the queue to finish in-flight work.
+	// This matters for media-db jobs that stop and must restart the Emby
+	// container: exiting here would leave Emby down.
+	jobCtx, jobCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer jobCancel()
+	if err := jobs.Shutdown(jobCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "job shutdown failed: %v\n", err)
 		os.Exit(1)
 	}
 }

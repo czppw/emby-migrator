@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -412,9 +413,25 @@ func (s *Server) sessionCookie(r *http.Request, token string) *http.Cookie {
 	}
 }
 
+// trustProxyHeaders gates X-Forwarded-* handling. Only enable it (via
+// EMBY_MIGRATOR_TRUST_PROXY=1) when the instance actually sits behind a
+// reverse proxy; otherwise clients can forge these headers to flag cookies
+// Secure or skew the login rate-limit key.
+func trustProxyHeaders() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EMBY_MIGRATOR_TRUST_PROXY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
+	}
+	if !trustProxyHeaders() {
+		return false
 	}
 	forwardedProto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
 	return strings.EqualFold(forwardedProto, "https")
@@ -422,6 +439,14 @@ func requestIsHTTPS(r *http.Request) bool {
 
 func loginRateLimitKey(r *http.Request, username string) string {
 	ip := strings.TrimSpace(r.RemoteAddr)
+	if trustProxyHeaders() {
+		// The rightmost X-Forwarded-For entry is the address our trusted
+		// proxy observed; leftmost entries are client-controlled.
+		forwarded := strings.TrimSpace(lastHeaderListValue(r.Header.Get("X-Forwarded-For")))
+		if forwarded != "" {
+			ip = forwarded
+		}
+	}
 	if host, _, err := net.SplitHostPort(ip); err == nil {
 		ip = host
 	}
@@ -431,6 +456,14 @@ func loginRateLimitKey(r *http.Request, username string) string {
 	}
 	usernameHash := sha256.Sum256([]byte(username))
 	return ip + ":" + hex.EncodeToString(usernameHash[:])
+}
+
+func lastHeaderListValue(value string) string {
+	parts := strings.Split(value, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[len(parts)-1]
 }
 
 func (s *Server) loginBlocked(key string, now time.Time) (time.Duration, bool) {

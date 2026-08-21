@@ -45,6 +45,7 @@ type Job struct {
 	pause               chan struct{}
 	maxMemoryLogEntries int
 	mu                  sync.RWMutex
+	fileMu              sync.Mutex
 }
 
 type LogEntry struct {
@@ -54,10 +55,13 @@ type LogEntry struct {
 }
 
 type Manager struct {
-	mu      sync.RWMutex
-	jobs    map[string]*Job
-	work    chan queuedWork
-	options ManagerOptions
+	mu        sync.RWMutex
+	jobs      map[string]*Job
+	work      chan queuedWork
+	options   ManagerOptions
+	done      chan struct{}
+	queueDone chan struct{}
+	stopOnce  sync.Once
 }
 
 type ManagerOptions struct {
@@ -86,11 +90,16 @@ func NewManager() *Manager {
 func NewManagerWithOptions(options ManagerOptions) *Manager {
 	options = normalizeManagerOptions(options)
 	m := &Manager{
-		jobs:    map[string]*Job{},
-		work:    make(chan queuedWork, 128),
-		options: options,
+		jobs:      map[string]*Job{},
+		work:      make(chan queuedWork, 128),
+		options:   options,
+		done:      make(chan struct{}),
+		queueDone: make(chan struct{}),
 	}
-	go m.runQueue()
+	go func() {
+		defer close(m.queueDone)
+		m.runQueue()
+	}()
 	return m
 }
 
@@ -159,12 +168,58 @@ func (m *Manager) List() []Job {
 }
 
 func (m *Manager) runQueue() {
-	for work := range m.work {
-		if work.run == nil || !work.job.Start() {
-			continue
+	for {
+		select {
+		case <-m.done:
+			return
+		case work, ok := <-m.work:
+			if !ok {
+				return
+			}
+			if work.run == nil || !work.job.Start() {
+				continue
+			}
+			m.runSafely(work.job, work.run)
+			m.afterWork()
 		}
-		work.run(work.job)
-		m.afterWork()
+	}
+}
+
+// maxPanicStackBytes bounds the stack trace attached to a crashed job so a
+// runaway recursive panic cannot balloon the job error string.
+const maxPanicStackBytes = 8192
+
+func (m *Manager) runSafely(j *Job, run func(*Job)) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			if len(stack) > maxPanicStackBytes {
+				stack = stack[:maxPanicStackBytes]
+			}
+			j.Fail(fmt.Errorf("任务发生内部错误(panic): %v\n%s", r, stack))
+		}
+	}()
+	run(j)
+}
+
+// Shutdown stops the queue from starting new jobs, cancels every running job
+// and waits for the queue goroutine to finish the work currently in flight.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.stopOnce.Do(func() { close(m.done) })
+	m.mu.RLock()
+	jobs := make([]*Job, 0, len(m.jobs))
+	for _, j := range m.jobs {
+		jobs = append(jobs, j)
+	}
+	m.mu.RUnlock()
+	for _, j := range jobs {
+		j.cancel()
+	}
+	select {
+	case <-m.queueDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -191,6 +246,9 @@ func (j *Job) Complete(result any) {
 	if isTerminalStatus(j.Status) {
 		return
 	}
+	if j.cancel != nil {
+		j.cancel()
+	}
 	now := time.Now()
 	j.Status = StatusDone
 	j.Result = result
@@ -209,6 +267,9 @@ func (j *Job) Fail(err error) {
 	if isTerminalStatus(j.Status) {
 		return
 	}
+	if j.cancel != nil {
+		j.cancel()
+	}
 	now := time.Now()
 	j.Status = StatusFailed
 	j.Error = err.Error()
@@ -226,6 +287,9 @@ func (j *Job) FailWithResult(err error, result any) {
 	defer j.mu.Unlock()
 	if isTerminalStatus(j.Status) {
 		return
+	}
+	if j.cancel != nil {
+		j.cancel()
 	}
 	now := time.Now()
 	j.Status = StatusFailed
@@ -313,10 +377,13 @@ func (j *Job) Log(level, message string, args ...any) {
 	}
 	entry := LogEntry{Time: time.Now(), Level: level, Message: message}
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.publishLocked(entry)
+	j.publishMemoryLocked(entry)
 	j.UpdatedAt = entry.Time
 	j.Message = message
+	j.mu.Unlock()
+	// Write the file outside the shared lock so concurrent workers are not
+	// serialized on disk I/O for every log line.
+	j.writeLogFile(entry)
 }
 
 func (j *Job) Snapshot() Job {
@@ -396,18 +463,31 @@ func (j *Job) resumeLocked() {
 }
 
 func (j *Job) publishLocked(entry LogEntry) {
+	j.publishMemoryLocked(entry)
+	j.writeLogFile(entry)
+}
+
+func (j *Job) publishMemoryLocked(entry LogEntry) {
 	j.logs = append(j.logs, entry)
 	if j.shouldTrimMemoryLogsLocked() {
 		j.trimMemoryLogsLocked()
-	}
-	if j.logFile != nil {
-		_, _ = j.logFile.WriteString(formatLogEntry(entry))
 	}
 	for ch := range j.subs {
 		select {
 		case ch <- entry:
 		default:
 		}
+	}
+}
+
+// writeLogFile serializes file writes under a dedicated lock. It may be called
+// with or without j.mu held (j.mu -> fileMu ordering is the only path, so no
+// deadlock); the hot Log path calls it after releasing j.mu.
+func (j *Job) writeLogFile(entry LogEntry) {
+	j.fileMu.Lock()
+	defer j.fileMu.Unlock()
+	if j.logFile != nil {
+		_, _ = j.logFile.WriteString(formatLogEntry(entry))
 	}
 }
 
@@ -450,6 +530,8 @@ func (j *Job) initLogFile(logDir string) {
 }
 
 func (j *Job) closeLogLocked() {
+	j.fileMu.Lock()
+	defer j.fileMu.Unlock()
 	if j.logFile == nil {
 		return
 	}
@@ -461,12 +543,16 @@ func formatLogEntry(entry LogEntry) string {
 	return fmt.Sprintf("%s 北京时间 [%s] %s\n", beijingTime(entry.Time).Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
 }
 
-func beijingTime(value time.Time) time.Time {
+var beijingLocation = func() *time.Location {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
-		return value.Local()
+		return time.Local
 	}
-	return value.In(location)
+	return location
+}()
+
+func beijingTime(value time.Time) time.Time {
+	return value.In(beijingLocation)
 }
 
 func normalizeManagerOptions(options ManagerOptions) ManagerOptions {
