@@ -1813,8 +1813,8 @@ func (s *Service) exportItem(ctx context.Context, client *emby.Client, exportDir
 const itemImageParallelism = 3
 
 type itemImageOutcome struct {
-	file  storage.FileEntry
-	ok    bool
+	file storage.FileEntry
+	ok   bool
 	// errMsg is preformatted with the image type/index; fetch failures are
 	// only recorded when the image list was authoritative, write failures
 	// always are.
