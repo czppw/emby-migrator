@@ -864,6 +864,25 @@ func TestGETRetriesTransientFailures(t *testing.T) {
 	}
 }
 
+func TestRetryDelayHonorsRetryAfterUpToCap(t *testing.T) {
+	base := retryDelay(0, nil)
+	if base <= 0 {
+		t.Fatalf("base retry delay = %v, want > 0", base)
+	}
+
+	// A modest Retry-After must raise the backoff above the base delay.
+	modest := retryDelay(0, &http.Response{Header: http.Header{"Retry-After": {"5"}}})
+	if modest <= base {
+		t.Fatalf("retry delay with Retry-After: 5 = %v, want > base %v", modest, base)
+	}
+
+	// A huge Retry-After must be capped rather than honored verbatim.
+	huge := retryDelay(0, &http.Response{Header: http.Header{"Retry-After": {"3600"}}})
+	if huge > retryAfterCap+retryBaseDelay {
+		t.Fatalf("retry delay = %v, want capped near %v", huge, retryAfterCap)
+	}
+}
+
 func TestPOSTIsNotRetried(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

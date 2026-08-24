@@ -2393,7 +2393,7 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (re
 		addImageFailureExamples(&report.Failures, match)
 	}
 	if databaseMediaInfoEnabled(req) && !req.DryRun {
-		planRef, err := writeMediaDatabasePlan(exportPath, manifest, report)
+		planRef, err := writeMediaDatabasePlan(exportPath, manifest, report, j)
 		if err != nil {
 			return ImportResult{}, err
 		}
@@ -4717,9 +4717,11 @@ func chooseUniqueMatch(matches []emby.Item, productionYear int) (emby.Item, []em
 		if len(yearMatches) == 1 {
 			return yearMatches[0], yearMatches, true
 		}
-		if len(yearMatches) > 1 {
-			return emby.Item{}, yearMatches, false
-		}
+		// A known production year with zero (or multiple) candidates matching
+		// it means the name-only candidates are a different title (for example
+		// a remake); treating them as a unique match would write metadata onto
+		// the wrong item.
+		return emby.Item{}, yearMatches, false
 	}
 	if len(matches) == 1 {
 		return matches[0], matches, true

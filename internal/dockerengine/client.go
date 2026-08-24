@@ -21,6 +21,13 @@ const (
 
 	dockerHost       = "http://docker"
 	maxErrorBodySize = 32 << 10
+
+	// responseHeaderTimeout must exceed the longest Docker stop grace
+	// period the migrator requests (60s), because /containers/{id}/stop
+	// does not send response headers until the container has actually
+	// stopped. A shorter timeout aborts the stop mid-grace and the caller
+	// then restarts a container that is still stopping.
+	responseHeaderTimeout = 90 * time.Second
 )
 
 // ClientOptions customizes a Client. HTTPClient is primarily useful for
@@ -102,7 +109,7 @@ func NewClientWithOptions(options ClientOptions) *Client {
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "unix", socketPath)
 			},
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: responseHeaderTimeout,
 		}
 		httpClient = &http.Client{Transport: transport}
 	}

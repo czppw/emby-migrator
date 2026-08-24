@@ -41,6 +41,35 @@ func TestLatestMediaDatabasePlanPathUsesModificationTime(t *testing.T) {
 	}
 }
 
+func TestMergeMediaDatabasePlanItemsPreservesPriorAndUpdatesCurrent(t *testing.T) {
+	previous := []MediaDatabasePlanItem{
+		{StableKey: "a", TargetItemID: "1", TargetName: "A"},
+		{StableKey: "b", TargetItemID: "2", TargetName: "B"},
+	}
+	current := []MediaDatabasePlanItem{
+		{StableKey: "b", TargetItemID: "20", TargetName: "B-rematched"},
+		{StableKey: "c", TargetItemID: "3", TargetName: "C"},
+	}
+
+	merged := mergeMediaDatabasePlanItems(previous, current)
+	if len(merged) != 3 {
+		t.Fatalf("merged len = %d, want 3 (%#v)", len(merged), merged)
+	}
+	byKey := make(map[string]MediaDatabasePlanItem, len(merged))
+	for _, item := range merged {
+		byKey[item.StableKey] = item
+	}
+	if byKey["a"].TargetItemID != "1" {
+		t.Fatalf("prior-only item a should be retained, got %#v", byKey["a"])
+	}
+	if byKey["b"].TargetItemID != "20" || byKey["b"].TargetName != "B-rematched" {
+		t.Fatalf("current item b should win, got %#v", byKey["b"])
+	}
+	if byKey["c"].TargetItemID != "3" {
+		t.Fatalf("new item c should be appended, got %#v", byKey["c"])
+	}
+}
+
 func TestBuildMediaDatabaseBindingRequiresServerIDAndBindsAllItems(t *testing.T) {
 	items := []MediaDatabasePlanItem{
 		{TargetItemID: "200", TargetName: "First Movie", SourceName: "First Movie"},

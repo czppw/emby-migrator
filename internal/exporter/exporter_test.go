@@ -77,6 +77,15 @@ func TestPortableNameMatchesRemainAmbiguousWithoutUniqueYear(t *testing.T) {
 	}
 }
 
+func TestChooseUniqueMatchRejectsYearConflictingSingleMatch(t *testing.T) {
+	items := []emby.Item{
+		{ID: "remake", Type: "Movie", Name: "Alpha", ProductionYear: 2019},
+	}
+	if selected, _, ok := chooseUniqueMatch(items, 2003); ok {
+		t.Fatalf("chooseUniqueMatch accepted a year-conflicting single match: %#v", selected)
+	}
+}
+
 func TestSeasonStableKeyIncludesParentSeriesPath(t *testing.T) {
 	first := storage.StableItemKey(emby.Item{
 		Type: "Season",

@@ -1062,18 +1062,21 @@ func retryDelay(attempt int, resp *http.Response) time.Duration {
 	if resp != nil {
 		if after := strings.TrimSpace(resp.Header.Get("Retry-After")); after != "" {
 			if seconds, err := strconv.Atoi(after); err == nil && seconds > 0 {
-				if capped := time.Duration(seconds) * time.Second; capped < delay {
-					delay = capped
+				requested := time.Duration(seconds) * time.Second
+				if requested > retryAfterCap {
+					requested = retryAfterCap
+				}
+				if requested > delay {
+					delay = requested
 				}
 			}
 		}
 	}
-	// Full jitter to avoid synchronized retry storms.
+	// Full jitter to avoid synchronized retry storms. The top-level rand
+	// functions use a locked source and are safe for concurrent callers.
 	half := delay / 2
-	return half + time.Duration(jitterRand.Int63n(int64(half)+1))
+	return half + time.Duration(rand.Int63n(int64(half)+1))
 }
-
-var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 func (c *Client) DownloadPath(ctx context.Context, endpoint string) ([]byte, string, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil, nil)

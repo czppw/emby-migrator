@@ -76,7 +76,7 @@ func packageMediaInfoPayload(exportPath string, entry storage.ItemEntry, info *s
 	return sanitizedMediaInfoPayload(info.Item, entry, exportPath)
 }
 
-func writeMediaDatabasePlan(exportPath string, manifest storage.Manifest, report ImportReport) (*MediaDatabasePlanRef, error) {
+func writeMediaDatabasePlan(exportPath string, manifest storage.Manifest, report ImportReport, j *job.Job) (*MediaDatabasePlanRef, error) {
 	entries := make(map[string]storage.ItemEntry, len(manifest.Items))
 	for _, entry := range manifest.Items {
 		entries[entry.StableKey] = entry
@@ -126,19 +126,66 @@ func writeMediaDatabasePlan(exportPath string, manifest storage.Manifest, report
 	if len(plan.Items) == 0 {
 		return nil, nil
 	}
+
+	targetKey := firstNonEmpty(report.Target.ServerID, report.Target.ServerName, report.Target.Version)
+	fileName := "media-db-plan-" + storage.SafeName(targetKey) + ".json"
+	planPath := filepath.Join(exportPath, fileName)
+
+	// An incremental import only plans the items it matched this run. Merging
+	// into any existing plan for the same target keeps an earlier, larger
+	// import from being silently replaced by a later, smaller one, which would
+	// otherwise leave previously planned media information unwritten after the
+	// plan is applied to library.db.
+	if previous, ok := readMediaDatabasePlanIfPresent(planPath); ok {
+		merged := mergeMediaDatabasePlanItems(previous.Items, plan.Items)
+		if j != nil {
+			j.Log("warn", "已合并既有媒体技术信息计划：先前 %d 项，本次 %d 项，合并后共 %d 项", len(previous.Items), len(plan.Items), len(merged))
+		}
+		plan.Items = merged
+	}
+
 	binding, err := buildMediaDatabaseBinding(plan.Target.ServerID, plan.Items)
 	if err != nil {
 		return nil, fmt.Errorf("build media database target binding: %w", err)
 	}
 	plan.DatabaseBinding = binding
 
-	targetKey := firstNonEmpty(report.Target.ServerID, report.Target.ServerName, report.Target.Version)
-	fileName := "media-db-plan-" + storage.SafeName(targetKey) + ".json"
-	planPath := filepath.Join(exportPath, fileName)
 	if err := storage.WriteJSON(planPath, plan); err != nil {
 		return nil, fmt.Errorf("write media database plan: %w", err)
 	}
 	return &MediaDatabasePlanRef{Path: planPath, Items: len(plan.Items), Status: "prepared"}, nil
+}
+
+// readMediaDatabasePlanIfPresent loads an existing plan file, reporting false
+// when none exists or the file is unreadable so that a stale or corrupt plan
+// never blocks a fresh import.
+func readMediaDatabasePlanIfPresent(path string) (MediaDatabasePlan, bool) {
+	var plan MediaDatabasePlan
+	if err := storage.ReadJSON(path, &plan); err != nil {
+		return MediaDatabasePlan{}, false
+	}
+	return plan, true
+}
+
+// mergeMediaDatabasePlanItems combines prior and current plan items keyed by
+// StableKey. Current items win, so a re-matched item keeps its latest target
+// ID and media payload while items only present in prior imports are retained.
+func mergeMediaDatabasePlanItems(previous, current []MediaDatabasePlanItem) []MediaDatabasePlanItem {
+	merged := make([]MediaDatabasePlanItem, 0, len(previous)+len(current))
+	index := make(map[string]int, len(previous))
+	for _, item := range previous {
+		index[item.StableKey] = len(merged)
+		merged = append(merged, item)
+	}
+	for _, item := range current {
+		if pos, ok := index[item.StableKey]; ok {
+			merged[pos] = item
+			continue
+		}
+		index[item.StableKey] = len(merged)
+		merged = append(merged, item)
+	}
+	return merged
 }
 
 func cloneAnyMap(source map[string]any) map[string]any {

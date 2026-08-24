@@ -78,17 +78,20 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "shutdown failed: %v\n", err)
-		os.Exit(1)
-	}
-	// Cancel running jobs and wait for the queue to finish in-flight work.
-	// This matters for media-db jobs that stop and must restart the Emby
-	// container: exiting here would leave Emby down.
+	shutdownErr := srv.Shutdown(ctx)
+	// Always cancel running jobs and wait for in-flight work even if the HTTP
+	// drain above timed out. This matters for media-db jobs that stop and must
+	// restart the Emby container: exiting before jobs.Shutdown would leave
+	// Emby down.
 	jobCtx, jobCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer jobCancel()
-	if err := jobs.Shutdown(jobCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "job shutdown failed: %v\n", err)
+	jobErr := jobs.Shutdown(jobCtx)
+	if shutdownErr != nil {
+		fmt.Fprintf(os.Stderr, "shutdown failed: %v\n", shutdownErr)
+		os.Exit(1)
+	}
+	if jobErr != nil {
+		fmt.Fprintf(os.Stderr, "job shutdown failed: %v\n", jobErr)
 		os.Exit(1)
 	}
 }
