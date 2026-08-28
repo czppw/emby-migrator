@@ -48,30 +48,47 @@ func (s *Server) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) checkLatestVersion() versionCheckResponse {
 	now := time.Now()
 	s.versionCheck.mu.Lock()
+	if now.Before(s.versionCheck.expiresAt) {
+		result := s.versionCheck.result
+		s.versionCheck.mu.Unlock()
+		return result
+	}
+	s.versionCheck.mu.Unlock()
+
+	// Fetch without holding the lock: the GitHub round-trip can take seconds
+	// and would otherwise serialize every /api/version request behind it.
+	result, err := fetchLatestVersion(s.cfg.Version)
+
+	s.versionCheck.mu.Lock()
 	defer s.versionCheck.mu.Unlock()
+	// Another request refreshed the cache while this one was fetching.
 	if now.Before(s.versionCheck.expiresAt) {
 		return s.versionCheck.result
 	}
-
-	result := versionCheckResponse{CurrentVersion: strings.TrimSpace(s.cfg.Version), CheckedAt: now}
-	release, err := fetchLatestReleaseAPI()
 	if err != nil {
-		release, err = fetchLatestReleaseRedirect()
-	}
-	if err == nil {
-		result.Checked = true
-		result.LatestVersion = normalizeVersionLabel(release.TagName)
-		result.ReleaseURL = strings.TrimSpace(release.HTMLURL)
-		result.UpdateAvailable = compareVersionNumbers(result.LatestVersion, result.CurrentVersion) > 0
-	}
-	if err != nil {
-		result.CheckedAt = time.Time{}
 		s.versionCheck.expiresAt = now.Add(versionCheckFailureTTL)
 	} else {
 		s.versionCheck.expiresAt = now.Add(versionCheckSuccessTTL)
 	}
 	s.versionCheck.result = result
 	return result
+}
+
+func fetchLatestVersion(currentVersion string) (versionCheckResponse, error) {
+	result := versionCheckResponse{CurrentVersion: strings.TrimSpace(currentVersion), CheckedAt: time.Now()}
+	release, err := fetchLatestReleaseAPI()
+	if err != nil {
+		release, err = fetchLatestReleaseRedirect()
+	}
+	if err != nil {
+		result.CheckedAt = time.Time{}
+		return result, err
+	}
+	result.Checked = true
+	result.LatestVersion = normalizeVersionLabel(release.TagName)
+	result.ReleaseURL = strings.TrimSpace(release.HTMLURL)
+	result.UpdateAvailable = compareVersionNumbers(result.LatestVersion, result.CurrentVersion) > 0
+	return result, nil
 }
 
 func fetchLatestReleaseAPI() (githubLatestRelease, error) {

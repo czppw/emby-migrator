@@ -143,12 +143,18 @@ func TestJobKeepsOnlyRecentLogsInMemoryAndWritesFullLogFile(t *testing.T) {
 		MaxMemoryLogEntries: 3,
 		MaxCompletedJobs:    20,
 	})
-	j := m.Create("export")
-	j.Start()
-	for i := 0; i < 5; i++ {
-		j.Log("info", "line %d", i)
+	j := m.Enqueue("export", func(j *Job) {
+		for i := 0; i < 5; i++ {
+			j.Log("info", "line %d", i)
+		}
+		j.Complete(nil)
+	})
+	sub, unsubscribe := j.Subscribe()
+	defer unsubscribe()
+	// The stream closes once the queue observed the run function returning
+	// and the log file is closed, which makes the file read below deterministic.
+	for range sub {
 	}
-	j.Complete(nil)
 
 	logs := j.Logs()
 	if len(logs) != 3 {
@@ -214,6 +220,90 @@ func TestManagerPrunesOldCompletedJobs(t *testing.T) {
 	}
 	if _, ok := m.Get(third.ID); !ok {
 		t.Fatalf("newest completed job should be retained")
+	}
+}
+
+func TestLogsAfterStopReachLogFileAndSubscribers(t *testing.T) {
+	m := NewManagerWithOptions(ManagerOptions{LogDir: t.TempDir()})
+	started := make(chan struct{})
+	windDown := make(chan struct{})
+	j := m.Enqueue("media-db-apply", func(j *Job) {
+		close(started)
+		<-windDown
+		// Runs after an external Stop: wind-down logging such as a media-db
+		// container restart must still reach the log file and the live stream.
+		j.Log("info", "恢复启动 Emby 容器")
+	})
+
+	sub, unsubscribe := j.Subscribe()
+	defer unsubscribe()
+
+	waitForSignal(t, started, "job did not start")
+	if !j.Stop() {
+		t.Fatalf("Stop returned false for running job")
+	}
+	close(windDown)
+
+	var sawWindDown, closed bool
+	timeout := time.After(2 * time.Second)
+	for !closed {
+		select {
+		case entry, ok := <-sub:
+			if !ok {
+				closed = true
+				break
+			}
+			if strings.Contains(entry.Message, "恢复启动 Emby 容器") {
+				sawWindDown = true
+			}
+		case <-timeout:
+			t.Fatalf("log stream never closed after run finished; wind-down received = %v", sawWindDown)
+		}
+	}
+	if !sawWindDown {
+		t.Fatalf("live stream missing wind-down entry logged after stop")
+	}
+
+	logPath, ok := j.LogPath()
+	if !ok {
+		t.Fatalf("expected disk log path")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "恢复启动 Emby 容器") {
+		t.Fatalf("log file missing wind-down entry logged after stop:\n%s", data)
+	}
+}
+
+func TestPrunedJobLogFileIsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManagerWithOptions(ManagerOptions{
+		LogDir:           dir,
+		MaxCompletedJobs: 1,
+	})
+	m.Enqueue("export", func(j *Job) { j.Complete("first") })
+	second := m.Enqueue("export", func(j *Job) { j.Complete("second") })
+	waitForStatus(t, second, StatusDone)
+	// Drain until the stream closes: the run function has returned and the
+	// log file is closed before the retained job is inspected.
+	sub, unsubscribe := second.Subscribe()
+	defer unsubscribe()
+	for range sub {
+	}
+	m.List()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("expected only the retained job log file, got %d entries: %v", len(entries), names)
 	}
 }
 

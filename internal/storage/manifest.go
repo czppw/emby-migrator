@@ -469,16 +469,6 @@ func BuildManifest(input ManifestInput) (Manifest, error) {
 	return manifest, nil
 }
 
-func uniqueSlugInt(base string, used map[string]int) string {
-	base = SafeName(base)
-	count := used[base]
-	used[base] = count + 1
-	if count == 0 {
-		return base
-	}
-	return base + "-" + intString(count+1)
-}
-
 func WriteJSON(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -489,6 +479,40 @@ func WriteJSON(path string, value any) error {
 	}
 	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o644)
+}
+
+// WriteJSONAtomic writes JSON through a temp file in the same directory and
+// renames it into place, so readers never observe a partially written file.
+// Use it for files written into already-published directories (import reports,
+// media-db plans); export-time files live inside a .partial directory and can
+// use the cheaper WriteJSON.
+func WriteJSONAtomic(path string, value any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	temp, err := os.CreateTemp(filepath.Dir(path), ".tmp-json-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 func ReadJSON(path string, out any) error {

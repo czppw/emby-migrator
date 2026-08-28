@@ -43,6 +43,7 @@ type Job struct {
 	subs                map[chan LogEntry]struct{}
 	paused              bool
 	pause               chan struct{}
+	finished            bool
 	maxMemoryLogEntries int
 	mu                  sync.RWMutex
 	fileMu              sync.Mutex
@@ -177,9 +178,11 @@ func (m *Manager) runQueue() {
 				return
 			}
 			if work.run == nil || !work.job.Start() {
+				work.job.finish()
 				continue
 			}
 			m.runSafely(work.job, work.run)
+			work.job.finish()
 			m.afterWork()
 		}
 	}
@@ -257,8 +260,6 @@ func (j *Job) Complete(result any) {
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "info", Message: "任务完成"})
 	j.trimMemoryLogsLocked()
-	j.closeSubsLocked()
-	j.closeLogLocked()
 }
 
 func (j *Job) Fail(err error) {
@@ -278,8 +279,6 @@ func (j *Job) Fail(err error) {
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "error", Message: err.Error()})
 	j.trimMemoryLogsLocked()
-	j.closeSubsLocked()
-	j.closeLogLocked()
 }
 
 func (j *Job) FailWithResult(err error, result any) {
@@ -300,8 +299,6 @@ func (j *Job) FailWithResult(err error, result any) {
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "error", Message: err.Error()})
 	j.trimMemoryLogsLocked()
-	j.closeSubsLocked()
-	j.closeLogLocked()
 }
 
 func (j *Job) Stop() bool {
@@ -318,8 +315,6 @@ func (j *Job) Stop() bool {
 	j.resumeLocked()
 	j.publishLocked(LogEntry{Time: now, Level: "warn", Message: "任务已停止"})
 	j.trimMemoryLogsLocked()
-	j.closeSubsLocked()
-	j.closeLogLocked()
 	return true
 }
 
@@ -429,7 +424,7 @@ func (j *Job) Subscribe() (<-chan LogEntry, func()) {
 	for _, entry := range j.logs {
 		ch <- entry
 	}
-	if isTerminalStatus(j.Status) {
+	if j.finished {
 		close(ch)
 		j.mu.Unlock()
 		return ch, func() {}
@@ -443,6 +438,40 @@ func (j *Job) Subscribe() (<-chan LogEntry, func()) {
 			close(ch)
 		}
 		j.mu.Unlock()
+	}
+}
+
+// finish marks the job's run function as returned: subscriber channels close
+// (SSE handlers emit the terminal status) and the log file closes. It runs
+// after the queue observes the run function return — including after a Stop —
+// so wind-down logs such as a media-db container restart still reach the log
+// file and any live stream.
+func (j *Job) finish() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.finished {
+		return
+	}
+	j.finished = true
+	j.closeSubsLocked()
+	j.closeLogLocked()
+}
+
+// dispose releases the job's resources when the manager prunes it: the log
+// file handle is closed and the log file on disk is removed.
+func (j *Job) dispose() {
+	j.mu.Lock()
+	path := j.logPath
+	j.logPath = ""
+	j.mu.Unlock()
+	j.fileMu.Lock()
+	if j.logFile != nil {
+		_ = j.logFile.Close()
+		j.logFile = nil
+	}
+	j.fileMu.Unlock()
+	if path != "" {
+		_ = os.Remove(path)
 	}
 }
 
@@ -601,6 +630,7 @@ func (m *Manager) pruneCompletedLocked(now time.Time) {
 		}
 		if m.options.CompletedJobRetention > 0 && !snapshot.EndedAt.IsZero() && now.Sub(snapshot.EndedAt) > m.options.CompletedJobRetention {
 			delete(m.jobs, snapshot.ID)
+			j.dispose()
 			continue
 		}
 		completed = append(completed, j)
@@ -613,5 +643,6 @@ func (m *Manager) pruneCompletedLocked(now time.Time) {
 	})
 	for _, j := range completed[m.options.MaxCompletedJobs:] {
 		delete(m.jobs, j.ID)
+		j.dispose()
 	}
 }

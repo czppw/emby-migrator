@@ -331,11 +331,6 @@ func (s *Server) newSessionToken(principal authPrincipal) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-func (s *Server) validSession(r *http.Request) bool {
-	_, ok := s.sessionPrincipal(r)
-	return ok
-}
-
 func (s *Server) sessionPrincipal(r *http.Request) (authPrincipal, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {

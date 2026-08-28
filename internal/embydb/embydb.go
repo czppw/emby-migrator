@@ -226,7 +226,17 @@ func prepareApplyStatements(ctx context.Context, conn *sql.Conn) (*applyStatemen
 	if err := prepare(&stmts.insertChapter, `INSERT INTO Chapters3 (ItemId, ChapterIndex, StartPositionTicks, Name, ImagePath, ImageDateModified, MarkerType) VALUES (?, ?, ?, ?, NULL, ?, ?)`); err != nil {
 		return nil, err
 	}
-	if err := prepare(&stmts.updateItem, `UPDATE MediaItems SET RunTimeTicks=?, TotalBitrate=?, Width=?, Height=?, Size=?, Container=? WHERE Id=?`); err != nil {
+	// COALESCE keeps the database's existing value when the plan does not
+	// carry a field, so a partial MediaSource payload cannot null out real
+	// data (for example Size on a source that did not report it).
+	if err := prepare(&stmts.updateItem, `UPDATE MediaItems SET
+		RunTimeTicks=COALESCE(?, RunTimeTicks),
+		TotalBitrate=COALESCE(?, TotalBitrate),
+		Width=COALESCE(?, Width),
+		Height=COALESCE(?, Height),
+		Size=COALESCE(?, Size),
+		Container=COALESCE(?, Container)
+		WHERE Id=?`); err != nil {
 		return nil, err
 	}
 	return stmts, nil

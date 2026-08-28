@@ -88,6 +88,41 @@ func TestApplySkipsExistingStreamsWithoutOverwrite(t *testing.T) {
 	}
 }
 
+func TestApplyKeepsExistingValuesWhenPlanFieldsMissing(t *testing.T) {
+	path := createFixtureDatabase(t)
+	db := openFixtureDatabase(t, path)
+	if _, err := db.Exec("UPDATE MediaItems SET Size=12345, Container='old-container', TotalBitrate=4321 WHERE Id=200"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	patch := fixturePatch()
+	patch.MediaSource = map[string]any{"RunTimeTicks": int64(999)}
+	result, err := Apply(context.Background(), ApplyOptions{
+		DatabasePath: path, SourceVersion: "4.9.5.0", TargetVersion: "4.9.5.0", Items: []ItemPatch{patch},
+	})
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if result.ItemsApplied != 1 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+
+	db = openFixtureDatabase(t, path)
+	defer db.Close()
+	var runtime, bitrate, size int64
+	var container string
+	if err := db.QueryRow("SELECT RunTimeTicks, TotalBitrate, Size, Container FROM MediaItems WHERE Id=200").Scan(&runtime, &bitrate, &size, &container); err != nil {
+		t.Fatal(err)
+	}
+	if runtime != 999 {
+		t.Fatalf("RunTimeTicks = %d, want 999", runtime)
+	}
+	if bitrate != 4321 || size != 12345 || container != "old-container" {
+		t.Fatalf("fields missing from the plan were overwritten: bitrate=%d size=%d container=%s", bitrate, size, container)
+	}
+}
+
 func TestApplyRejectsCrossVersionAndLockedDatabase(t *testing.T) {
 	path := createFixtureDatabase(t)
 	_, err := Apply(context.Background(), ApplyOptions{

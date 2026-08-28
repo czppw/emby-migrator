@@ -150,7 +150,10 @@ func writeMediaDatabasePlan(exportPath string, manifest storage.Manifest, report
 	}
 	plan.DatabaseBinding = binding
 
-	if err := storage.WriteJSON(planPath, plan); err != nil {
+	// The plan is written into a published package and merged with any
+	// existing plan on the next import, so a torn write must never leave a
+	// file that silently replaces the previous plan.
+	if err := storage.WriteJSONAtomic(planPath, plan); err != nil {
 		return nil, fmt.Errorf("write media database plan: %w", err)
 	}
 	return &MediaDatabasePlanRef{Path: planPath, Items: len(plan.Items), Status: "prepared"}, nil
@@ -265,7 +268,7 @@ func (s *Service) ApplyMediaDatabasePlan(ctx context.Context, j *job.Job, reques
 		result.ItemsApplied, result.ItemsSkipped, result.StreamsWritten, result.ChaptersWritten, result.BackupPath)
 	applyResult := MediaDatabaseApplyResult{PlanPath: planPath, Result: result}
 	resultPath := filepath.Join(exportPath, "media-db-apply-"+time.Now().Format("20060102-150405.000000000")+".json")
-	if err := storage.WriteJSON(resultPath, applyResult); err != nil {
+	if err := storage.WriteJSONAtomic(resultPath, applyResult); err != nil {
 		return MediaDatabaseApplyResult{}, fmt.Errorf("write media database apply report: %w", err)
 	}
 	return applyResult, nil

@@ -2421,7 +2421,7 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (re
 	if err != nil {
 		return ImportResult{}, err
 	}
-	if err := storage.WriteJSON(reportPath, report); err != nil {
+	if err := storage.WriteJSONAtomic(reportPath, report); err != nil {
 		return ImportResult{}, err
 	}
 	j.Log("info", "导入报告已写入：%s", reportPath)

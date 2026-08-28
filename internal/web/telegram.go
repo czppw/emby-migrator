@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,7 +52,7 @@ func (s *Server) handleTelegramSettingsGet(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleTelegramSettingsSave(w http.ResponseWriter, r *http.Request) {
-	settings, err := s.telegramSettingsFromRequest(w, r, true)
+	settings, err := s.telegramSettingsFromRequest(w, r)
 	if err != nil || settings == nil {
 		return
 	}
@@ -64,7 +65,7 @@ func (s *Server) handleTelegramSettingsSave(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleTelegramSettingsTest(w http.ResponseWriter, r *http.Request) {
-	settings, err := s.telegramSettingsFromRequest(w, r, false)
+	settings, err := s.telegramSettingsFromRequest(w, r)
 	if err != nil || settings == nil {
 		return
 	}
@@ -83,7 +84,7 @@ func (s *Server) handleTelegramSettingsTest(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) telegramSettingsFromRequest(w http.ResponseWriter, r *http.Request, preserveSavedToken bool) (*telegramSettings, error) {
+func (s *Server) telegramSettingsFromRequest(w http.ResponseWriter, r *http.Request) (*telegramSettings, error) {
 	var req telegramSettingsRequest
 	if !decodeJSON(w, r, &req) {
 		return nil, fmt.Errorf("invalid json")
@@ -276,7 +277,13 @@ func (s *Server) notifyTelegramJobTerminal(j *job.Job) {
 	s.pruneTelegramNotifications()
 	logs := j.Logs()
 	go func() {
-		_ = s.sendTelegramJobTerminalNotification(context.Background(), &snapshot, logs)
+		if err := s.sendTelegramJobTerminalNotification(context.Background(), &snapshot, logs); err != nil {
+			// Release the dedup marker so a later terminal notification for
+			// the same job (for example the deferred one after a Stop
+			// wind-down) can retry the failed delivery.
+			s.telegramNotifications.Delete(snapshot.ID)
+			log.Printf("Telegram 任务通知发送失败：%v", err)
+		}
 	}()
 }
 

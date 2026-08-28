@@ -524,12 +524,30 @@ func (c *Client) SystemInfo(ctx context.Context) (SystemInfo, error) {
 }
 
 func (c *Client) Libraries(ctx context.Context) ([]Library, error) {
-	var result ItemsResponse
-	if err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{"Limit": {"100"}}, nil, &result); err != nil {
-		return nil, err
+	// Paginate instead of fetching a single Limit=100 page: servers with many
+	// top-level items (playlists, folders, ...) would silently hide libraries
+	// beyond the first page.
+	items := make([]Item, 0)
+	start := 0
+	for {
+		var result ItemsResponse
+		err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
+			"StartIndex": {fmt.Sprintf("%d", start)},
+			"Limit":      {fmt.Sprintf("%d", DefaultLimit)},
+		}, nil, &result)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, result.Items...)
+		// A short page means the server has no more data even if
+		// TotalRecordCount disagrees (or is absent).
+		if len(result.Items) == 0 || len(items) >= result.TotalRecordCount || len(result.Items) < DefaultLimit {
+			break
+		}
+		start += len(result.Items)
 	}
 	libraries := make([]Library, 0)
-	for _, item := range result.Items {
+	for _, item := range items {
 		if item.Type != "CollectionFolder" && item.Type != "Folder" {
 			continue
 		}
