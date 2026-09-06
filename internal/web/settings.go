@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +38,8 @@ type appServerProfileSettings struct {
 	Name                string `json:"name,omitempty"`
 	BaseURL             string `json:"baseUrl,omitempty"`
 	APIKey              string `json:"apiKey,omitempty"`
+	ServerID            string `json:"serverId,omitempty"`
+	Version             string `json:"version,omitempty"`
 	DatabasePath        string `json:"databasePath,omitempty"`
 	ContainerName       string `json:"containerName,omitempty"`
 	AutoManageContainer bool   `json:"autoManageContainer,omitempty"`
@@ -90,6 +93,8 @@ type appServerProfileResponse struct {
 	Role                string `json:"role,omitempty"`
 	HasAPIKey           bool   `json:"hasApiKey"`
 	APIKeyMasked        string `json:"apiKeyMasked,omitempty"`
+	ServerID            string `json:"serverId,omitempty"`
+	Version             string `json:"version,omitempty"`
 	DatabasePath        string `json:"databasePath,omitempty"`
 	ContainerName       string `json:"containerName,omitempty"`
 	AutoManageContainer bool   `json:"autoManageContainer"`
@@ -102,6 +107,8 @@ type appProfileSaveRequest struct {
 	Name                string `json:"name"`
 	BaseURL             string `json:"baseUrl"`
 	APIKey              string `json:"apiKey"`
+	ServerID            string `json:"serverId"`
+	Version             string `json:"version"`
 	DatabasePath        string `json:"databasePath"`
 	ContainerName       string `json:"containerName"`
 	AutoManageContainer bool   `json:"autoManageContainer"`
@@ -296,6 +303,9 @@ func buildAppSettingsFromRequest(current appSettings, req appSettingsRequest) (a
 				profileReq.APIKey = apiKey
 			}
 		}
+		if strings.TrimSpace(profileReq.ServerID) == "" {
+			profileReq.ServerID, profileReq.Version = fetchServerIdentity(profileReq.BaseURL, profileReq.APIKey)
+		}
 		profile, err := normalizedProfileFromSave(profileReq, current.Profiles, now)
 		if err != nil {
 			return appSettings{}, err
@@ -484,6 +494,27 @@ func (s *Server) appSettingsPath() string {
 	return filepath.Join(s.configDir(), appSettingsFileName)
 }
 
+// fetchServerIdentity is a best-effort lookup of a server's identity used for
+// offline safety checks; it must never block or fail a profile save.
+func fetchServerIdentity(baseURL, apiKey string) (string, string) {
+	baseURL = strings.TrimSpace(baseURL)
+	apiKey = strings.TrimSpace(apiKey)
+	if baseURL == "" || apiKey == "" {
+		return "", ""
+	}
+	client, err := emby.NewClient(baseURL, apiKey)
+	if err != nil {
+		return "", ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := client.SystemInfo(ctx)
+	if err != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(info.ID), strings.TrimSpace(info.Version)
+}
+
 func appSettingsToResponse(settings appSettings) appSettingsResponse {
 	apiKey := strings.TrimSpace(settings.Connection.APIKey)
 	profiles := profilesToResponse(settings.Profiles)
@@ -515,6 +546,9 @@ func (s *Server) saveProfileFromRequest(req appProfileSaveRequest) (appSettings,
 			if normalizedBaseURL, err := emby.NormalizeBaseURL(req.BaseURL); err == nil {
 				req.APIKey = savedAPIKeyForProfileSave(*settings, normalizedBaseURL)
 			}
+		}
+		if strings.TrimSpace(req.ServerID) == "" {
+			req.ServerID, req.Version = fetchServerIdentity(req.BaseURL, req.APIKey)
 		}
 		profile, err := normalizedProfileFromSave(req, settings.Profiles, now)
 		if err != nil {
@@ -633,11 +667,19 @@ func normalizedProfileFromSave(req appProfileSaveRequest, existing []appServerPr
 	if createdAt == "" {
 		createdAt = now
 	}
+	serverID := strings.TrimSpace(req.ServerID)
+	version := strings.TrimSpace(req.Version)
+	if serverID == "" && current.BaseURL == normalizedBaseURL {
+		serverID = strings.TrimSpace(current.ServerID)
+		version = strings.TrimSpace(current.Version)
+	}
 	return appServerProfileSettings{
 		ID:                  id,
 		Name:                name,
 		BaseURL:             normalizedBaseURL,
 		APIKey:              apiKey,
+		ServerID:            serverID,
+		Version:             version,
 		DatabasePath:        strings.TrimSpace(req.DatabasePath),
 		ContainerName:       containerName,
 		AutoManageContainer: req.AutoManageContainer,
@@ -708,6 +750,8 @@ func profilesToResponse(profiles []appServerProfileSettings) []appServerProfileR
 			Role:                profile.Role,
 			HasAPIKey:           apiKey != "",
 			APIKeyMasked:        emby.MaskAPIKey(apiKey),
+			ServerID:            profile.ServerID,
+			Version:             profile.Version,
 			DatabasePath:        profile.DatabasePath,
 			ContainerName:       profile.ContainerName,
 			AutoManageContainer: profile.AutoManageContainer,
