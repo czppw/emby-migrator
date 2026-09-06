@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,7 +94,10 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		return ApplyResult{}, err
 	}
-	if expected := strings.TrimSpace(options.ExpectedSchemaIdentity); expected != "" && expected != schemaIdentity {
+	// A legacy (pre-fingerprint) plan identity acts as a wildcard and only the
+	// structural column checks above apply; a computed fingerprint must match
+	// the actual database schema exactly.
+	if expected := strings.TrimSpace(options.ExpectedSchemaIdentity); expected != "" && expected != MediaSchemaIdentity && expected != schemaIdentity {
 		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		return ApplyResult{}, fmt.Errorf("target Emby database schema identity mismatch: plan %q, database %q", expected, schemaIdentity)
 	}
@@ -180,13 +184,26 @@ func Apply(ctx context.Context, options ApplyOptions) (ApplyResult, error) {
 	return result, nil
 }
 
-var streamInsertSQL = `INSERT INTO MediaStreams2 (
-	ItemId, StreamIndex, StreamType, Codec, Language, ChannelLayout, Profile, AspectRatio, Path,
-	IsInterlaced, BitRate, Channels, SampleRate, IsDefault, IsForced, IsHearingImpaired, IsExternal,
-	Height, Width, AverageFrameRate, RealFrameRate, Level, PixelFormat, BitDepth, IsAnamorphic,
-	RefFrames, Rotation, CodecTag, Comment, NalLengthSize, Title, TimeBase, ColorPrimaries, ColorSpace,
-	ColorTransfer, Extradata, AttachmentSize, MimeType, ExtendedVideoType, ExtendedVideoSubtype
-) VALUES (` + strings.TrimRight(strings.Repeat("?,", 40), ",") + `)`
+// streamInsertColumns is the single source of truth for the MediaStreams2
+// column order used by both the insert and the in-transaction readback check.
+var streamInsertColumns = []string{
+	"ItemId", "StreamIndex", "StreamType", "Codec", "Language", "ChannelLayout", "Profile", "AspectRatio", "Path",
+	"IsInterlaced", "BitRate", "Channels", "SampleRate", "IsDefault", "IsForced", "IsHearingImpaired", "IsExternal",
+	"Height", "Width", "AverageFrameRate", "RealFrameRate", "Level", "PixelFormat", "BitDepth", "IsAnamorphic",
+	"RefFrames", "Rotation", "CodecTag", "Comment", "NalLengthSize", "Title", "TimeBase", "ColorPrimaries", "ColorSpace",
+	"ColorTransfer", "Extradata", "AttachmentSize", "MimeType", "ExtendedVideoType", "ExtendedVideoSubtype",
+}
+
+var chapterColumns = []string{
+	"ItemId", "ChapterIndex", "StartPositionTicks", "Name", "ImagePath", "ImageDateModified", "MarkerType",
+}
+
+var streamInsertSQL = "INSERT INTO MediaStreams2 (" + strings.Join(streamInsertColumns, ", ") + ") VALUES (" +
+	strings.TrimRight(strings.Repeat("?,", len(streamInsertColumns)), ",") + ")"
+
+var streamSelectSQL = "SELECT " + strings.Join(streamInsertColumns, ", ") + " FROM MediaStreams2 WHERE ItemId=? AND StreamIndex=?"
+
+var chapterSelectSQL = "SELECT " + strings.Join(chapterColumns, ", ") + " FROM Chapters3 WHERE ItemId=? AND ChapterIndex=?"
 
 type applyStatements struct {
 	findItem       *sql.Stmt
@@ -196,6 +213,8 @@ type applyStatements struct {
 	insertStream   *sql.Stmt
 	insertChapter  *sql.Stmt
 	updateItem     *sql.Stmt
+	selectStream   *sql.Stmt
+	selectChapter  *sql.Stmt
 }
 
 func prepareApplyStatements(ctx context.Context, conn *sql.Conn) (*applyStatements, error) {
@@ -223,7 +242,16 @@ func prepareApplyStatements(ctx context.Context, conn *sql.Conn) (*applyStatemen
 	if err := prepare(&stmts.insertStream, streamInsertSQL); err != nil {
 		return nil, err
 	}
+	// ImagePath stays NULL: the source API only exposes ImageTag, and the
+	// chapter image files themselves live in the source server's metadata
+	// directory and are not part of the export package.
 	if err := prepare(&stmts.insertChapter, `INSERT INTO Chapters3 (ItemId, ChapterIndex, StartPositionTicks, Name, ImagePath, ImageDateModified, MarkerType) VALUES (?, ?, ?, ?, NULL, ?, ?)`); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.selectStream, streamSelectSQL); err != nil {
+		return nil, err
+	}
+	if err := prepare(&stmts.selectChapter, chapterSelectSQL); err != nil {
 		return nil, err
 	}
 	// COALESCE keeps the database's existing value when the plan does not
@@ -243,7 +271,7 @@ func prepareApplyStatements(ctx context.Context, conn *sql.Conn) (*applyStatemen
 }
 
 func (s *applyStatements) close() {
-	for _, stmt := range []*sql.Stmt{s.findItem, s.countStreams, s.deleteStreams, s.deleteChapters, s.insertStream, s.insertChapter, s.updateItem} {
+	for _, stmt := range []*sql.Stmt{s.findItem, s.countStreams, s.deleteStreams, s.deleteChapters, s.insertStream, s.insertChapter, s.selectStream, s.selectChapter, s.updateItem} {
 		if stmt != nil {
 			_ = stmt.Close()
 		}
@@ -347,6 +375,9 @@ func applyItem(ctx context.Context, stmts *applyStatements, item ItemPatch, over
 		if err != nil {
 			return false, 0, 0, fmt.Errorf("item %d stream %d: %w", item.TargetItemID, index, err)
 		}
+		// Column order must match streamInsertSQL. Path stays NULL on purpose:
+		// stream paths are host-specific (external subtitles, ...) and the
+		// target server derives its own during the next library scan.
 		values := []any{
 			item.TargetItemID, streamIndex, streamType, pick(stream, "codec"), pick(stream, "language"),
 			pick(stream, "channellayout"), pick(stream, "profile"), pick(stream, "aspectratio"), nil,
@@ -359,10 +390,18 @@ func applyItem(ctx context.Context, stmts *applyStatements, item ItemPatch, over
 			pick(stream, "rotation"), pick(stream, "codectag"), pick(stream, "comment"),
 			pick(stream, "nallengthsize"), pick(stream, "title"), pick(stream, "timebase"),
 			pick(stream, "colorprimaries"), pick(stream, "colorspace"), pick(stream, "colortransfer"),
-			nil, nil, pick(stream, "mimetype"), 0, 0,
+			pick(stream, "extradata"), pick(stream, "attachmentsize"), pick(stream, "mimetype"),
+			pick(stream, "extendedvideotype"), pick(stream, "extendedvideosubtype"),
 		}
 		if _, err := stmts.insertStream.ExecContext(ctx, values...); err != nil {
 			return false, 0, 0, fmt.Errorf("write target item %d stream %d: %w", item.TargetItemID, index, err)
+		}
+		// Read the row back inside the same transaction and compare every
+		// column, so a writer bug (dropped or hard-coded columns) fails the
+		// whole apply with a rollback instead of committing partial data.
+		if err := verifyInsertedRow(ctx, stmts.selectStream, streamInsertColumns, values,
+			item.TargetItemID, streamIndex, "stream"); err != nil {
+			return false, 0, 0, fmt.Errorf("verify target item %d stream %d: %w", item.TargetItemID, index, err)
 		}
 	}
 
@@ -378,6 +417,15 @@ func applyItem(ctx context.Context, stmts *applyStatements, item ItemPatch, over
 			item.TargetItemID, chapterIndex, start, pick(chapter, "name"), emptyDateModified, marker); err != nil {
 			return false, 0, 0, fmt.Errorf("write target item %d chapter %d: %w", item.TargetItemID, index, err)
 		}
+		// ImagePath is the literal NULL in chapterInsertSQL; include it in the
+		// expected row so the readback check covers the full column layout.
+		expected := []any{
+			item.TargetItemID, chapterIndex, start, pick(chapter, "name"), nil, emptyDateModified, marker,
+		}
+		if err := verifyInsertedRow(ctx, stmts.selectChapter, chapterColumns, expected,
+			item.TargetItemID, chapterIndex, "chapter"); err != nil {
+			return false, 0, 0, fmt.Errorf("verify target item %d chapter %d: %w", item.TargetItemID, index, err)
+		}
 	}
 
 	width, height := primaryVideoDimensions(foldedStreams)
@@ -388,6 +436,71 @@ func applyItem(ctx context.Context, stmts *applyStatements, item ItemPatch, over
 		return false, 0, 0, fmt.Errorf("update target item %d media summary: %w", item.TargetItemID, err)
 	}
 	return true, len(item.MediaStreams), len(item.Chapters), nil
+}
+
+// verifyInsertedRow re-reads a just-inserted row by its unique key and checks
+// every column against the exact values written, so silent truncation or a
+// mismatched column order surfaces as an apply failure (and rollback) rather
+// than quietly committed partial data.
+func verifyInsertedRow(ctx context.Context, stmt *sql.Stmt, columns []string, expected []any, key ...any) error {
+	actual := make([]any, len(columns))
+	dest := make([]any, len(columns))
+	for index := range actual {
+		dest[index] = &actual[index]
+	}
+	rowKey := strings.TrimSpace(fmt.Sprint(key[0]))
+	if len(key) > 1 {
+		rowKey += ":" + strings.TrimSpace(fmt.Sprint(key[1]))
+	}
+	if err := stmt.QueryRowContext(ctx, key...).Scan(dest...); err != nil {
+		return fmt.Errorf("read back row (%s): %w", rowKey, err)
+	}
+	for index := range columns {
+		if !sqlValuesEqual(expected[index], actual[index]) {
+			return fmt.Errorf("row (%s) column %s: wrote %v, read back %v", rowKey, columns[index], expected[index], actual[index])
+		}
+	}
+	return nil
+}
+
+func sqlValuesEqual(expected, actual any) bool {
+	if expected == nil || actual == nil {
+		return expected == nil && actual == nil
+	}
+	expected = normalizeSQLiteValue(expected)
+	switch typed := expected.(type) {
+	case string:
+		switch actualTyped := actual.(type) {
+		case string:
+			return typed == actualTyped
+		case []byte:
+			return typed == string(actualTyped)
+		default:
+			return false
+		}
+	case int, int64, float64:
+		expectedFloat, expectedOK := numericAsFloat(expected)
+		actualFloat, actualOK := numericAsFloat(actual)
+		if !expectedOK || !actualOK {
+			return false
+		}
+		return expectedFloat == actualFloat
+	default:
+		return reflect.DeepEqual(expected, actual)
+	}
+}
+
+func numericAsFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case float64:
+		return typed, true
+	default:
+		return 0, false
+	}
 }
 
 // foldKeys returns a copy of values with keys lowercased and trimmed so that

@@ -112,20 +112,21 @@ type CompatibilityProfile struct {
 }
 
 type ImportReport struct {
-	StartedAt     time.Time             `json:"startedAt"`
-	EndedAt       time.Time             `json:"endedAt"`
-	DryRun        bool                  `json:"dryRun"`
-	Target        ImportTarget          `json:"target,omitempty"`
-	Compatibility CompatibilityProfile  `json:"compatibility"`
-	Diff          ImportDiff            `json:"diff,omitempty"`
-	Incremental   *ImportIncremental    `json:"incremental,omitempty"`
-	Skips         *ImportSkipReport     `json:"skips,omitempty"`
-	Failures      FailureReport         `json:"failures,omitempty"`
-	Matches       []ImportMatch         `json:"matches"`
-	PersonMatches []ImportMatch         `json:"personMatches,omitempty"`
-	Summary       storage.Summary       `json:"summary"`
-	WritesSkipped int                   `json:"writesSkipped,omitempty"`
-	MediaDatabase *MediaDatabasePlanRef `json:"mediaDatabase,omitempty"`
+	StartedAt          time.Time             `json:"startedAt"`
+	EndedAt            time.Time             `json:"endedAt"`
+	DryRun             bool                  `json:"dryRun"`
+	Target             ImportTarget          `json:"target,omitempty"`
+	PackageFingerprint string                `json:"packageFingerprint,omitempty"`
+	Compatibility      CompatibilityProfile  `json:"compatibility"`
+	Diff               ImportDiff            `json:"diff,omitempty"`
+	Incremental        *ImportIncremental    `json:"incremental,omitempty"`
+	Skips              *ImportSkipReport     `json:"skips,omitempty"`
+	Failures           FailureReport         `json:"failures,omitempty"`
+	Matches            []ImportMatch         `json:"matches"`
+	PersonMatches      []ImportMatch         `json:"personMatches,omitempty"`
+	Summary            storage.Summary       `json:"summary"`
+	WritesSkipped      int                   `json:"writesSkipped,omitempty"`
+	MediaDatabase      *MediaDatabasePlanRef `json:"mediaDatabase,omitempty"`
 }
 
 type MediaDatabasePlanRef struct {
@@ -211,11 +212,12 @@ type FailureExample struct {
 }
 
 type importCheckpoint struct {
-	SchemaVersion int                         `json:"schemaVersion"`
-	Target        ImportTarget                `json:"target,omitempty"`
-	UpdatedAt     time.Time                   `json:"updatedAt"`
-	Items         map[string]ImportCheckpoint `json:"items,omitempty"`
-	PersonAvatars map[string]ImportCheckpoint `json:"personAvatars,omitempty"`
+	SchemaVersion      int                         `json:"schemaVersion"`
+	Target             ImportTarget                `json:"target,omitempty"`
+	PackageFingerprint string                      `json:"packageFingerprint,omitempty"`
+	UpdatedAt          time.Time                   `json:"updatedAt"`
+	Items              map[string]ImportCheckpoint `json:"items,omitempty"`
+	PersonAvatars      map[string]ImportCheckpoint `json:"personAvatars,omitempty"`
 }
 
 type importCheckpointJournalEntry struct {
@@ -416,7 +418,14 @@ func (c *importLookupCache) findPersonByName(ctx context.Context, client *emby.C
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), importMatchTimeout)
 	call.person, call.err = findPersonByNameCached(fetchCtx, client, name)
 	cancel()
+	// Drop failed lookups from the cache so a transient network error does
+	// not poison every later lookup of the same person within this import.
+	c.mu.Lock()
+	if call.err != nil && c.personCalls[key] == call {
+		delete(c.personCalls, key)
+	}
 	close(call.ready)
+	c.mu.Unlock()
 	return call.person, call.err
 }
 
@@ -2318,10 +2327,11 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (re
 		return ImportResult{}, fmt.Errorf("媒体技术信息离线恢复仅支持同版本系列：源 Emby %s，目标 Emby %s；请关闭媒体技术信息后继续普通元数据和图片迁移", emptyDash(manifest.EmbyVersion), emptyDash(targetInfo.Version))
 	}
 	report := ImportReport{
-		StartedAt:     time.Now(),
-		DryRun:        req.DryRun,
-		Target:        importTargetFromSystemInfo(targetInfo),
-		Compatibility: profile,
+		StartedAt:          time.Now(),
+		DryRun:             req.DryRun,
+		Target:             importTargetFromSystemInfo(targetInfo),
+		PackageFingerprint: packageFingerprint(exportPath),
+		Compatibility:      profile,
 	}
 	report.Target.BaseURL = strings.TrimRight(req.Connection.BaseURL, "/")
 	report.Diff = initialImportDiff(manifest.Summary)
@@ -2340,9 +2350,11 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (re
 	}
 	resumeDone := map[string]bool{}
 	if req.Resume {
-		if done, reportName := s.resumeSuccessfulItems(exportPath, report.Target, req.ImportMediaInfo); len(done) > 0 {
+		if done, reportName, mismatched := s.resumeSuccessfulItems(exportPath, report.Target, req.ImportMediaInfo); len(done) > 0 {
 			resumeDone = done
 			j.Log("info", "断点续跑：读取上次报告 %s，跳过已成功项目 %d 个", reportName, len(done))
+		} else if len(mismatched) > 0 {
+			j.Log("warn", "断点续跑：%s 由旧导出包内容生成，与当前导出包指纹不一致，已忽略以避免跳过新内容", strings.Join(mismatched, "、"))
 		}
 	}
 	if len(resumeDone) > 0 {
@@ -2364,7 +2376,7 @@ func (s *Service) Import(ctx context.Context, j *job.Job, req ImportRequest) (re
 		j.Log("info", "[DRY] 本次只验证匹配，不会写入元数据和图片")
 	}
 	cache := newImportLookupCache()
-	checkpoint := newImportCheckpointStore(exportPath, report.Target)
+	checkpoint := newImportCheckpointStore(exportPath, report.Target, report.PackageFingerprint)
 	defer func() {
 		if closeErr := checkpoint.Close(); closeErr != nil {
 			if err == nil {
@@ -2597,14 +2609,16 @@ func addSkippedWrites(report *ImportReport, source string, count int) {
 	}
 }
 
-func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, requireMediaInfo ...bool) (map[string]bool, string) {
+func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, requireMediaInfo ...bool) (map[string]bool, string, []string) {
+	fingerprint := packageFingerprint(exportPath)
 	entries, err := os.ReadDir(exportPath)
 	if err != nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	done := map[string]bool{}
 	sources := make([]string, 0)
-	if checkpoint, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target); ok {
+	var mismatched []string
+	if checkpoint, ok, fingerprintMismatch := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target, fingerprint); ok {
 		for key, item := range checkpoint.Items {
 			if shouldResumeItemCheckpoint(item, requireMediaInfo...) {
 				done[key] = true
@@ -2613,6 +2627,8 @@ func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, 
 		if len(done) > 0 {
 			sources = append(sources, "import-checkpoint.json")
 		}
+	} else if fingerprintMismatch {
+		mismatched = append(mismatched, "import-checkpoint.json")
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
 	for _, entry := range entries {
@@ -2624,6 +2640,10 @@ func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, 
 			continue
 		}
 		if !sameImportTarget(report.Target, target) {
+			continue
+		}
+		if !samePackageFingerprint(report.PackageFingerprint, fingerprint) {
+			mismatched = append(mismatched, entry.Name())
 			continue
 		}
 		added := 0
@@ -2638,20 +2658,27 @@ func (s *Service) resumeSuccessfulItems(exportPath string, target ImportTarget, 
 		}
 	}
 	if len(done) == 0 {
-		return nil, ""
+		return nil, "", mismatched
 	}
-	return done, strings.Join(sources, ",")
+	return done, strings.Join(sources, ","), mismatched
 }
 
-func readImportCheckpoint(path string, target ImportTarget) (importCheckpoint, bool) {
+// readImportCheckpoint loads a checkpoint bound to the target and the current
+// package fingerprint. The second bool reports a fingerprint mismatch: the
+// file exists and targets the same server, but was written for different
+// package contents and must not be used for resume.
+func readImportCheckpoint(path string, target ImportTarget, fingerprint string) (importCheckpoint, bool, bool) {
 	checkpoint, found, err := loadImportCheckpoint(path)
 	if err != nil || !found {
-		return importCheckpoint{}, false
+		return importCheckpoint{}, false, false
 	}
 	if !sameImportTarget(checkpoint.Target, target) {
-		return importCheckpoint{}, false
+		return importCheckpoint{}, false, false
 	}
-	return checkpoint, true
+	if !samePackageFingerprint(checkpoint.PackageFingerprint, fingerprint) {
+		return checkpoint, false, true
+	}
+	return checkpoint, true, false
 }
 
 func loadImportCheckpoint(path string) (importCheckpoint, bool, error) {
@@ -2765,6 +2792,29 @@ func shouldResumePersonAvatarCheckpoint(item ImportCheckpoint) bool {
 	return item.Status == "uploaded"
 }
 
+// packageFingerprint hashes the export manifest so resume skips are bound to
+// the exact package contents: replacing the manifest in the same directory
+// invalidates older reports and checkpoints instead of silently skipping new
+// content.
+func packageFingerprint(exportPath string) string {
+	data, err := os.ReadFile(filepath.Join(exportPath, "manifest.json"))
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// samePackageFingerprint reports whether a record may be used for the current
+// package. Records without a fingerprint (written by older versions) keep the
+// legacy behavior and are accepted.
+func samePackageFingerprint(recorded, current string) bool {
+	if recorded == "" || current == "" {
+		return true
+	}
+	return recorded == current
+}
+
 func sameImportTarget(a, b ImportTarget) bool {
 	aID := strings.TrimSpace(a.ServerID)
 	bID := strings.TrimSpace(b.ServerID)
@@ -2800,6 +2850,7 @@ type importCheckpointStore struct {
 	path             string
 	journalPath      string
 	target           ImportTarget
+	fingerprint      string
 	mu               sync.Mutex
 	checkpoint       importCheckpoint
 	journal          *os.File
@@ -2811,11 +2862,12 @@ type importCheckpointStore struct {
 
 const importCheckpointSyncInterval = 25
 
-func newImportCheckpointStore(exportPath string, target ImportTarget) *importCheckpointStore {
+func newImportCheckpointStore(exportPath string, target ImportTarget, fingerprint string) *importCheckpointStore {
 	return &importCheckpointStore{
 		path:        filepath.Join(exportPath, "import-checkpoint.json"),
 		journalPath: filepath.Join(exportPath, "import-checkpoint.json.journal"),
 		target:      target,
+		fingerprint: fingerprint,
 	}
 }
 
@@ -2827,12 +2879,16 @@ func (s *importCheckpointStore) initializeLocked() error {
 	if err != nil {
 		return err
 	}
-	if !found || !sameImportTarget(checkpoint.Target, s.target) {
+	// A checkpoint bound to different package contents must not skip items
+	// of the current package, so it is discarded and rebuilt.
+	if !found || !sameImportTarget(checkpoint.Target, s.target) ||
+		!samePackageFingerprint(checkpoint.PackageFingerprint, s.fingerprint) {
 		checkpoint = importCheckpoint{
-			SchemaVersion: 1,
-			Target:        s.target,
-			Items:         map[string]ImportCheckpoint{},
-			PersonAvatars: map[string]ImportCheckpoint{},
+			SchemaVersion:      1,
+			Target:             s.target,
+			PackageFingerprint: s.fingerprint,
+			Items:              map[string]ImportCheckpoint{},
+			PersonAvatars:      map[string]ImportCheckpoint{},
 		}
 	}
 	if checkpoint.Items == nil {
@@ -3931,6 +3987,14 @@ func mergeItemMetadata(current *emby.Item, entry storage.ItemEntry, exportPath s
 }
 
 func sanitizedMediaInfoPayload(source emby.Item, entry storage.ItemEntry, exportPath string) map[string]any {
+	return sanitizedMediaInfoPayloadWithKeys(source, entry, exportPath, mediaSourceAllowedKeys, mediaStreamAllowedKeys)
+}
+
+// sanitizedMediaInfoPayloadWithKeys builds the sanitized media payload with
+// caller-chosen key sets. The strict sets are used for update payloads sent
+// to the target; the plan sets additionally keep source-bound fields so the
+// media database plan stays complete.
+func sanitizedMediaInfoPayloadWithKeys(source emby.Item, entry storage.ItemEntry, exportPath string, sourceKeys, streamKeys map[string]bool) map[string]any {
 	rawPayloads := make([]map[string]any, 0, 3)
 	if source.Raw != nil {
 		rawPayloads = append(rawPayloads, source.Raw)
@@ -3964,10 +4028,10 @@ func sanitizedMediaInfoPayload(source emby.Item, entry storage.ItemEntry, export
 	streams = uniqueObjectSlice(append(append([]map[string]any(nil), streams...), mediaStreamsFromSources(sources)...))
 
 	out := map[string]any{}
-	if sanitized := sanitizeMediaSources(sources); len(sanitized) > 0 {
+	if sanitized := sanitizeMediaSourcesWith(sources, sourceKeys, streamKeys); len(sanitized) > 0 {
 		out["MediaSources"] = sanitized
 	}
-	if sanitized := sanitizeMediaStreams(streams); len(sanitized) > 0 {
+	if sanitized := sanitizeMediaStreamsWith(streams, streamKeys); len(sanitized) > 0 {
 		out["MediaStreams"] = sanitized
 	}
 	if sanitized := sanitizeChapters(chapters); len(sanitized) > 0 {
@@ -3979,6 +4043,9 @@ func sanitizedMediaInfoPayload(source emby.Item, entry storage.ItemEntry, export
 // The allowed-key sets below are fixed schemas; build them once instead of
 // per call, which used to reallocate 40+ entry maps for every media stream.
 var (
+	// The strict sets scrub metadata payloads sent to the target: source-bound
+	// values (paths, ids, ETags, per-server capabilities) are dropped there
+	// because they would overwrite target-side data.
 	mediaSourceAllowedKeys = stringSet(
 		"Protocol", "Container", "Size", "Name", "RunTimeTicks", "Bitrate",
 		"VideoType", "IsoType", "Video3DFormat", "DefaultAudioStreamIndex",
@@ -3995,14 +4062,42 @@ var (
 		"ColorTransfer", "DvVersionMajor", "DvVersionMinor", "DvProfile", "DvLevel",
 		"RpuPresentFlag", "ElPresentFlag", "BlPresentFlag", "DvBlSignalCompatibilityId",
 		"Rotation", "Comment",
+		// Previously dropped; restored so the database plan can write them
+		// whenever the source server exposes them.
+		"Extradata", "CodecTag", "IsHearingImpaired", "AttachmentSize",
+		"MimeType", "ExtendedVideoType", "ExtendedVideoSubtype",
 	)
 	chapterAllowedKeys = stringSet("StartPositionTicks", "Name", "ImageTag", "MarkerType", "ChapterIndex")
+
+	// The plan sets extend the strict sets with source-bound fields so the
+	// media database plan keeps multi-source items complete and verification
+	// can cross-check them. They are never sent to the target API.
+	planMediaSourceAllowedKeys = unionStringSet(mediaSourceAllowedKeys, stringSet(
+		"Id", "Path", "Type", "ETag", "IsRemote",
+		"SupportsDirectPlay", "SupportsDirectStream", "SupportsTranscoding",
+	))
+	planMediaStreamAllowedKeys = unionStringSet(mediaStreamAllowedKeys, stringSet("Path"))
 )
 
+func unionStringSet(base, extra map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(base)+len(extra))
+	for key := range base {
+		out[key] = true
+	}
+	for key := range extra {
+		out[key] = true
+	}
+	return out
+}
+
 func sanitizeMediaSources(values []map[string]any) []map[string]any {
+	return sanitizeMediaSourcesWith(values, mediaSourceAllowedKeys, mediaStreamAllowedKeys)
+}
+
+func sanitizeMediaSourcesWith(values []map[string]any, sourceKeys, streamKeys map[string]bool) []map[string]any {
 	out := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		if sanitized := sanitizeMediaInfoMap(value, mediaSourceAllowedKeys, true); len(sanitized) > 0 {
+		if sanitized := sanitizeMediaInfoMap(value, sourceKeys, streamKeys, true); len(sanitized) > 0 {
 			out = append(out, sanitized)
 		}
 	}
@@ -4010,9 +4105,13 @@ func sanitizeMediaSources(values []map[string]any) []map[string]any {
 }
 
 func sanitizeMediaStreams(values []map[string]any) []map[string]any {
+	return sanitizeMediaStreamsWith(values, mediaStreamAllowedKeys)
+}
+
+func sanitizeMediaStreamsWith(values []map[string]any, streamKeys map[string]bool) []map[string]any {
 	out := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		if sanitized := sanitizeMediaInfoMap(value, mediaStreamAllowedKeys, false); len(sanitized) > 0 {
+		if sanitized := sanitizeMediaInfoMap(value, streamKeys, streamKeys, false); len(sanitized) > 0 {
 			out = append(out, sanitized)
 		}
 	}
@@ -4022,14 +4121,14 @@ func sanitizeMediaStreams(values []map[string]any) []map[string]any {
 func sanitizeChapters(values []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		if sanitized := sanitizeMediaInfoMap(value, chapterAllowedKeys, false); len(sanitized) > 0 {
+		if sanitized := sanitizeMediaInfoMap(value, chapterAllowedKeys, chapterAllowedKeys, false); len(sanitized) > 0 {
 			out = append(out, sanitized)
 		}
 	}
 	return out
 }
 
-func sanitizeMediaInfoMap(value map[string]any, allowed map[string]bool, allowStreams bool) map[string]any {
+func sanitizeMediaInfoMap(value map[string]any, allowed, streamAllowed map[string]bool, allowStreams bool) map[string]any {
 	out := make(map[string]any, len(value))
 	for key, rawValue := range value {
 		if !allowed[strings.ToLower(strings.TrimSpace(key))] {
@@ -4039,7 +4138,7 @@ func sanitizeMediaInfoMap(value map[string]any, allowed map[string]bool, allowSt
 			if !allowStreams {
 				continue
 			}
-			if streams := sanitizeMediaStreams(objectSliceFromAny(rawValue)); len(streams) > 0 {
+			if streams := sanitizeMediaStreamsWith(objectSliceFromAny(rawValue), streamAllowed); len(streams) > 0 {
 				out[key] = streams
 			}
 			continue
@@ -4138,7 +4237,7 @@ func (s *Service) importPeopleImages(ctx context.Context, client *emby.Client, c
 	tasks := make([]personImageTask, 0)
 	resumeDone := map[string]bool{}
 	if resume {
-		if existing, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), report.Target); ok {
+		if existing, ok, _ := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), report.Target, report.PackageFingerprint); ok {
 			for key, avatar := range existing.PersonAvatars {
 				if shouldResumePersonAvatarCheckpoint(avatar) {
 					resumeDone[key] = true

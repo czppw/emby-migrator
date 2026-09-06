@@ -236,3 +236,43 @@ func TestVerifyMediaDatabasePlanReadsBackStreamsAndChapters(t *testing.T) {
 		t.Fatalf("verify result = %#v", result)
 	}
 }
+
+func TestVerifyMediaDatabasePlanRejectsChangedStreamField(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "fixture")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), storage.Manifest{}); err != nil {
+		t.Fatal(err)
+	}
+	plan := MediaDatabasePlan{
+		SchemaVersion: 1,
+		Items: []MediaDatabasePlanItem{{
+			TargetItemID: "200",
+			TargetName:   "Big Buck Bunny",
+			MediaStreams: []map[string]any{{"Index": 0, "Type": "Video", "Codec": "h264"}},
+		}},
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "media-db-plan-fixture.json"), plan); err != nil {
+		t.Fatal(err)
+	}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Items": []map[string]any{{
+				"Id":           "200",
+				"Name":         "Big Buck Bunny",
+				"Type":         "Movie",
+				"MediaStreams": []map[string]any{{"Index": 0, "Type": "Video", "Codec": "hevc"}},
+			}},
+			"TotalRecordCount": 1,
+		})
+	}))
+	defer mock.Close()
+
+	_, err := service.VerifyMediaDatabasePlan(context.Background(), "fixture", emby.Connection{BaseURL: mock.URL, APIKey: "test"})
+	if err == nil || !strings.Contains(err.Error(), "codec") {
+		t.Fatalf("verify should reject a changed stream field, got error: %v", err)
+	}
+}

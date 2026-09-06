@@ -294,9 +294,12 @@ func TestResumeSuccessfulItemsReadsLatestSuccessfulReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done, reportName := service.resumeSuccessfulItems(exportDir, ImportTarget{})
+	done, reportName, mismatched := service.resumeSuccessfulItems(exportDir, ImportTarget{})
 	if reportName != "import-report-20260617-110000.json" {
 		t.Fatalf("reportName = %q", reportName)
+	}
+	if len(mismatched) != 0 {
+		t.Fatalf("mismatched = %#v", mismatched)
 	}
 	if !done["done"] || done["bad"] || done["dry"] {
 		t.Fatalf("resume map = %#v", done)
@@ -311,7 +314,7 @@ func TestResumeSuccessfulItemsMergesCheckpointAndReportsForSameTarget(t *testing
 		t.Fatal(err)
 	}
 	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
-	checkpoint := newImportCheckpointStore(exportDir, target)
+	checkpoint := newImportCheckpointStore(exportDir, target, "")
 	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.Record(ImportMatch{StableKey: "checkpoint", SourceName: "Checkpoint", TargetID: "item-1", Status: "updated"}); err != nil {
 		t.Fatal(err)
@@ -333,12 +336,60 @@ func TestResumeSuccessfulItemsMergesCheckpointAndReportsForSameTarget(t *testing
 		t.Fatal(err)
 	}
 
-	done, reportName := service.resumeSuccessfulItems(exportDir, target)
+	done, reportName, _ := service.resumeSuccessfulItems(exportDir, target)
 	if !strings.Contains(reportName, "import-checkpoint.json") || !strings.Contains(reportName, "import-report-20260617-100000.json") {
 		t.Fatalf("reportName = %q", reportName)
 	}
 	if !done["checkpoint"] || !done["older"] || done["other-target"] {
 		t.Fatalf("resume map = %#v", done)
+	}
+}
+
+func TestResumeSuccessfulItemsIgnoresReportsFromDifferentPackageContents(t *testing.T) {
+	dataDir := t.TempDir()
+	service := NewService(dataDir)
+	exportDir := filepath.Join(service.ExportsDir(), "pkg")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "manifest.json"), map[string]any{"items": []string{"new-content"}}); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := packageFingerprint(exportDir)
+	if fingerprint == "" {
+		t.Fatal("expected a package fingerprint from manifest.json")
+	}
+	target := ImportTarget{ServerID: "target-a"}
+	checkpoint := newImportCheckpointStore(exportDir, target, fingerprint)
+	t.Cleanup(func() { _ = checkpoint.Close() })
+	if err := checkpoint.Record(ImportMatch{StableKey: "current-checkpoint", SourceName: "Current", TargetID: "item-1", Status: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-100000.json"), ImportReport{
+		Target: target, PackageFingerprint: fingerprint,
+		Matches: []ImportMatch{{StableKey: "current-report", Status: "updated"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.WriteJSON(filepath.Join(exportDir, "import-report-20260617-110000.json"), ImportReport{
+		Target: target, PackageFingerprint: "stale-package-fingerprint",
+		Matches: []ImportMatch{{StableKey: "stale-report", Status: "updated"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done, reportName, mismatched := service.resumeSuccessfulItems(exportDir, target)
+	if !done["current-checkpoint"] || !done["current-report"] {
+		t.Fatalf("current-package resume entries missing: %#v", done)
+	}
+	if done["stale-report"] {
+		t.Fatalf("stale-package report must not be used for resume: %#v", done)
+	}
+	if len(mismatched) != 1 || mismatched[0] != "import-report-20260617-110000.json" {
+		t.Fatalf("mismatched = %#v, want the stale report", mismatched)
+	}
+	if !strings.Contains(reportName, "import-report-20260617-100000.json") {
+		t.Fatalf("reportName = %q", reportName)
 	}
 }
 
@@ -350,7 +401,7 @@ func TestResumeSuccessfulItemsDoesNotResumeImageFailedItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := ImportTarget{ServerID: "target-a"}
-	checkpoint := newImportCheckpointStore(exportDir, target)
+	checkpoint := newImportCheckpointStore(exportDir, target, "")
 	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.Record(ImportMatch{
 		StableKey:     "image-failed-checkpoint",
@@ -379,7 +430,7 @@ func TestResumeSuccessfulItemsDoesNotResumeImageFailedItems(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done, _ := service.resumeSuccessfulItems(exportDir, target)
+	done, _, _ := service.resumeSuccessfulItems(exportDir, target)
 	if done["image-failed-checkpoint"] || done["image-failed-report"] {
 		t.Fatalf("image-failed items should not resume as complete: %#v", done)
 	}
@@ -399,7 +450,7 @@ func TestResumeSuccessfulItemsRequiresCompletedMediaInfoWhenEnabled(t *testing.T
 		t.Fatal(err)
 	}
 	target := ImportTarget{ServerID: "target-a"}
-	checkpoint := newImportCheckpointStore(exportDir, target)
+	checkpoint := newImportCheckpointStore(exportDir, target, "")
 	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.Record(ImportMatch{StableKey: "media-updated-checkpoint", Status: "updated", MediaInfoUpdated: 1}); err != nil {
 		t.Fatal(err)
@@ -416,7 +467,7 @@ func TestResumeSuccessfulItemsRequiresCompletedMediaInfoWhenEnabled(t *testing.T
 		t.Fatal(err)
 	}
 
-	done, _ := service.resumeSuccessfulItems(exportDir, target, true)
+	done, _, _ := service.resumeSuccessfulItems(exportDir, target, true)
 	for _, key := range []string{"media-updated-checkpoint", "media-updated", "media-skipped"} {
 		if !done[key] {
 			t.Fatalf("completed media info item %q should resume: %#v", key, done)
@@ -433,7 +484,7 @@ func TestImportCheckpointRecordClearsItemsWhenTargetSwitches(t *testing.T) {
 	exportDir := t.TempDir()
 	firstTarget := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
 	secondTarget := ImportTarget{ServerID: "target-b", ServerName: "Target B", Version: "4.9.5"}
-	first := newImportCheckpointStore(exportDir, firstTarget)
+	first := newImportCheckpointStore(exportDir, firstTarget, "")
 	if err := first.Record(ImportMatch{StableKey: "old-item", SourceName: "Old", TargetID: "old-target", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
@@ -444,13 +495,13 @@ func TestImportCheckpointRecordClearsItemsWhenTargetSwitches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := newImportCheckpointStore(exportDir, secondTarget)
+	second := newImportCheckpointStore(exportDir, secondTarget, "")
 	t.Cleanup(func() { _ = second.Close() })
 	if err := second.Record(ImportMatch{StableKey: "new-item", SourceName: "New", TargetID: "new-target", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
 
-	checkpoint, ok := readImportCheckpoint(filepath.Join(exportDir, "import-checkpoint.json"), secondTarget)
+	checkpoint, ok, _ := readImportCheckpoint(filepath.Join(exportDir, "import-checkpoint.json"), secondTarget, "")
 	if !ok {
 		t.Fatalf("checkpoint should read for second target")
 	}
@@ -482,7 +533,7 @@ func TestImportCheckpointAppendsJournalAndCompactsLegacyJSONOnClose(t *testing.T
 		t.Fatal(err)
 	}
 
-	store := newImportCheckpointStore(exportDir, target)
+	store := newImportCheckpointStore(exportDir, target, "")
 	const itemCount = 128
 	for i := 0; i < itemCount; i++ {
 		if err := store.Record(ImportMatch{
@@ -512,7 +563,7 @@ func TestImportCheckpointAppendsJournalAndCompactsLegacyJSONOnClose(t *testing.T
 	if got, want := strings.Count(string(journal), "\n"), itemCount+1; got != want {
 		t.Fatalf("journal records = %d, want %d", got, want)
 	}
-	active, ok := readImportCheckpoint(path, target)
+	active, ok, _ := readImportCheckpoint(path, target, "")
 	if !ok || len(active.Items) != itemCount+1 || active.PersonAvatars["person-one"].Status != "uploaded" {
 		t.Fatalf("active checkpoint did not merge JSON and journal: %#v", active)
 	}
@@ -523,7 +574,7 @@ func TestImportCheckpointAppendsJournalAndCompactsLegacyJSONOnClose(t *testing.T
 	if _, err := os.Stat(path + ".journal"); !os.IsNotExist(err) {
 		t.Fatalf("journal should be removed after compaction, stat err = %v", err)
 	}
-	compacted, ok := readImportCheckpoint(path, target)
+	compacted, ok, _ := readImportCheckpoint(path, target, "")
 	if !ok || len(compacted.Items) != itemCount+1 || compacted.PersonAvatars["person-one"].Status != "uploaded" {
 		t.Fatalf("compacted checkpoint is incomplete: %#v", compacted)
 	}
@@ -533,7 +584,7 @@ func TestImportCheckpointRecoversDurableJournalAfterInterruptedWrite(t *testing.
 	exportDir := t.TempDir()
 	path := filepath.Join(exportDir, "import-checkpoint.json")
 	target := ImportTarget{ServerID: "target-a"}
-	interrupted := newImportCheckpointStore(exportDir, target)
+	interrupted := newImportCheckpointStore(exportDir, target, "")
 	if err := interrupted.Record(ImportMatch{StableKey: "item-one", TargetID: "target-one", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
@@ -559,11 +610,11 @@ func TestImportCheckpointRecoversDurableJournalAfterInterruptedWrite(t *testing.
 		t.Fatal(err)
 	}
 
-	recovered, ok := readImportCheckpoint(path, target)
+	recovered, ok, _ := readImportCheckpoint(path, target, "")
 	if !ok || recovered.Items["item-one"].Status != "updated" || recovered.PersonAvatars["person-one"].Status != "uploaded" {
 		t.Fatalf("durable journal was not recovered: %#v", recovered)
 	}
-	store := newImportCheckpointStore(exportDir, target)
+	store := newImportCheckpointStore(exportDir, target, "")
 	if err := store.Record(ImportMatch{StableKey: "item-two", TargetID: "target-two", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
@@ -574,18 +625,18 @@ func TestImportCheckpointRecoversDurableJournalAfterInterruptedWrite(t *testing.
 	}
 	store.closed = true
 	store.mu.Unlock()
-	recoveredAgain, ok := readImportCheckpoint(path, target)
+	recoveredAgain, ok, _ := readImportCheckpoint(path, target, "")
 	if !ok || len(recoveredAgain.Items) != 2 {
 		t.Fatalf("record appended after a torn tail was not recoverable: %#v", recoveredAgain)
 	}
-	compactor := newImportCheckpointStore(exportDir, target)
+	compactor := newImportCheckpointStore(exportDir, target, "")
 	if err := compactor.Record(ImportMatch{StableKey: "item-three", TargetID: "target-three", Status: "updated"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := compactor.Close(); err != nil {
 		t.Fatal(err)
 	}
-	compacted, ok := readImportCheckpoint(path, target)
+	compacted, ok, _ := readImportCheckpoint(path, target, "")
 	if !ok || len(compacted.Items) != 3 || compacted.PersonAvatars["person-one"].Status != "uploaded" {
 		t.Fatalf("recovered journal did not compact correctly: %#v", compacted)
 	}
@@ -2617,7 +2668,7 @@ func TestImportPeopleImagesRecordsAndResumesPersonAvatarCheckpoint(t *testing.T)
 		}
 	}
 	target := ImportTarget{ServerID: "target-a", ServerName: "Target A", Version: "4.9.5"}
-	checkpoint := newImportCheckpointStore(exportPath, target)
+	checkpoint := newImportCheckpointStore(exportPath, target, "")
 	t.Cleanup(func() { _ = checkpoint.Close() })
 	if err := checkpoint.RecordPersonAvatar(personImageResult{StableKey: "person-one", Name: "Actor One", TargetID: "person-target-one"}); err != nil {
 		t.Fatal(err)
@@ -2678,7 +2729,7 @@ func TestImportPeopleImagesRecordsAndResumesPersonAvatarCheckpoint(t *testing.T)
 	if report.Summary.PeopleImages != 1 || report.Summary.PeopleImagesFailed != 0 {
 		t.Fatalf("unexpected people image summary: %#v", report.Summary)
 	}
-	stored, ok := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target)
+	stored, ok, _ := readImportCheckpoint(filepath.Join(exportPath, "import-checkpoint.json"), target, "")
 	if !ok {
 		t.Fatalf("checkpoint should be readable")
 	}

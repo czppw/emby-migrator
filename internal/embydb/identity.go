@@ -82,6 +82,7 @@ func validateSchema(ctx context.Context, conn *sql.Conn) (string, error) {
 		tables = append(tables, table)
 	}
 	sort.Strings(tables)
+	allColumns := make(map[string][]string, len(tables))
 	for _, table := range tables {
 		rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+table+")")
 		if err != nil {
@@ -98,7 +99,9 @@ func validateSchema(ctx context.Context, conn *sql.Conn) (string, error) {
 				rows.Close()
 				return "", fmt.Errorf("inspect %s schema: %w", table, err)
 			}
-			found[strings.ToLower(name)] = true
+			lower := strings.ToLower(name)
+			found[lower] = true
+			allColumns[table] = append(allColumns[table], lower)
 			if primaryKeyPosition > 0 {
 				primaryKey[primaryKeyPosition] = name
 			}
@@ -123,7 +126,52 @@ func validateSchema(ctx context.Context, conn *sql.Conn) (string, error) {
 			}
 		}
 	}
-	return MediaSchemaIdentity, nil
+	return computeSchemaIdentity(allColumns), nil
+}
+
+// computeSchemaIdentity fingerprints the actual column layout of the checked
+// tables, so a plan bound to one Emby version's database is rejected when
+// applied to a database whose schema differs.
+func computeSchemaIdentity(columns map[string][]string) string {
+	tables := make([]string, 0, len(columns))
+	for table := range columns {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	var canonical strings.Builder
+	for _, table := range tables {
+		canonical.WriteString(table)
+		canonical.WriteByte('(')
+		sorted := append([]string(nil), columns[table]...)
+		sort.Strings(sorted)
+		canonical.WriteString(strings.Join(sorted, ","))
+		canonical.WriteByte(')')
+	}
+	sum := sha256.Sum256([]byte(canonical.String()))
+	return "emby-media-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// IsKnownSchemaIdentity reports whether identity is either the legacy
+// pre-fingerprint constant or a computed fingerprint.
+func IsKnownSchemaIdentity(identity string) bool {
+	identity = strings.TrimSpace(identity)
+	if identity == MediaSchemaIdentity {
+		return true
+	}
+	const prefix = "emby-media-"
+	if !strings.HasPrefix(identity, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(identity, prefix)
+	if len(suffix) != 16 {
+		return false
+	}
+	for _, r := range suffix {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func primaryKeyColumns(columns map[int]string) []string {
