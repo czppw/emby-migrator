@@ -220,7 +220,7 @@ func TestApplyReportsVerifiedSchemaAndTargetIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("same-series apply failed: %v", err)
 	}
-	if result.TargetServerID != "target-server" || result.TargetBindingDigest != digest || result.SchemaIdentity != MediaSchemaIdentity {
+	if result.TargetServerID != "target-server" || result.TargetBindingDigest != digest || !strings.HasPrefix(result.SchemaIdentity, "emby-media-") {
 		t.Fatalf("verified identity was not reported: %#v", result)
 	}
 }
@@ -414,5 +414,24 @@ func fixturePatch() ItemPatch {
 			{"ChapterIndex": 0, "StartPositionTicks": int64(0), "Name": "Opening"},
 			{"ChapterIndex": 1, "StartPositionTicks": int64(60000000), "Name": "Verification"},
 		},
+	}
+}
+
+func TestIsKnownSchemaIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		identity string
+		want     bool
+	}{
+		{MediaSchemaIdentity, true},
+		{"emby-media-906bd6140f8e7e31", true},
+		{"emby-media-906BD6140F8E7E31", false},
+		{"emby-media-short", false},
+		{"emby-media-", false},
+		{"unknown-schema", false},
+		{"", false},
+	} {
+		if got := IsKnownSchemaIdentity(tt.identity); got != tt.want {
+			t.Errorf("IsKnownSchemaIdentity(%q) = %v, want %v", tt.identity, got, tt.want)
+		}
 	}
 }

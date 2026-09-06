@@ -3,7 +3,6 @@ package emby
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +20,16 @@ import (
 
 const (
 	DefaultLimit = 100
+
+	// maxPagesWithoutTotal bounds pagination when the server omits
+	// TotalRecordCount: 10000 pages of 100 items covers a million items, far
+	// beyond any realistic library, while still preventing an unbounded loop
+	// against a server that ignores StartIndex.
+	maxPagesWithoutTotal = 10000
+
+	// maxImageDownloadBytes caps image responses (posters, backdrops, person
+	// avatars) so a misbehaving or malicious endpoint cannot exhaust memory.
+	maxImageDownloadBytes = 64 << 20
 )
 
 // sharedTransport keeps idle connections warm across clients. The default
@@ -529,6 +538,7 @@ func (c *Client) Libraries(ctx context.Context) ([]Library, error) {
 	// beyond the first page.
 	items := make([]Item, 0)
 	start := 0
+	pagesWithoutTotal := 0
 	for {
 		var result ItemsResponse
 		err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
@@ -539,10 +549,23 @@ func (c *Client) Libraries(ctx context.Context) ([]Library, error) {
 			return nil, err
 		}
 		items = append(items, result.Items...)
-		// A short page means the server has no more data even if
-		// TotalRecordCount disagrees (or is absent).
-		if len(result.Items) == 0 || len(items) >= result.TotalRecordCount || len(result.Items) < DefaultLimit {
+		if len(result.Items) == 0 {
 			break
+		}
+		// A short page means the server has no more data even if
+		// TotalRecordCount disagrees.
+		if result.TotalRecordCount > 0 {
+			if len(items) >= result.TotalRecordCount {
+				break
+			}
+		} else {
+			pagesWithoutTotal++
+			if len(result.Items) < DefaultLimit {
+				break
+			}
+			if pagesWithoutTotal >= maxPagesWithoutTotal {
+				return nil, fmt.Errorf("server omitted TotalRecordCount and pagination did not converge after %d pages", maxPagesWithoutTotal)
+			}
 		}
 		start += len(result.Items)
 	}
@@ -630,6 +653,7 @@ func (c *Client) Items(ctx context.Context, libraryID string) ([]Item, error) {
 	}, ",")
 	items := make([]Item, 0)
 	start := 0
+	pagesWithoutTotal := 0
 	for {
 		var result ItemsResponse
 		err := c.JSON(ctx, http.MethodGet, "/Items", url.Values{
@@ -644,10 +668,23 @@ func (c *Client) Items(ctx context.Context, libraryID string) ([]Item, error) {
 			return items, err
 		}
 		items = append(items, result.Items...)
-		if len(items) >= result.TotalRecordCount || len(result.Items) == 0 {
+		if len(result.Items) == 0 {
 			break
 		}
-		start += DefaultLimit
+		if result.TotalRecordCount > 0 {
+			if len(items) >= result.TotalRecordCount {
+				break
+			}
+		} else {
+			pagesWithoutTotal++
+			if len(result.Items) < DefaultLimit {
+				break
+			}
+			if pagesWithoutTotal >= maxPagesWithoutTotal {
+				return items, fmt.Errorf("server omitted TotalRecordCount for library %s and pagination did not converge after %d pages", libraryID, maxPagesWithoutTotal)
+			}
+		}
+		start += len(result.Items)
 	}
 	return items, nil
 }
@@ -661,6 +698,7 @@ func (c *Client) ListItemsPaged(ctx context.Context, query ItemsQuery) ([]Item, 
 	}
 	items := make([]Item, 0)
 	start := 0
+	pagesWithoutTotal := 0
 	for {
 		params := url.Values{
 			"ParentId":   {query.ParentID},
@@ -679,10 +717,23 @@ func (c *Client) ListItemsPaged(ctx context.Context, query ItemsQuery) ([]Item, 
 			return items, err
 		}
 		items = append(items, result.Items...)
-		if len(items) >= result.TotalRecordCount || len(result.Items) == 0 {
+		if len(result.Items) == 0 {
 			break
 		}
-		start += query.PageSize
+		if result.TotalRecordCount > 0 {
+			if len(items) >= result.TotalRecordCount {
+				break
+			}
+		} else {
+			pagesWithoutTotal++
+			if len(result.Items) < query.PageSize {
+				break
+			}
+			if pagesWithoutTotal >= maxPagesWithoutTotal {
+				return items, fmt.Errorf("server omitted TotalRecordCount and pagination did not converge after %d pages", maxPagesWithoutTotal)
+			}
+		}
+		start += len(result.Items)
 	}
 	return items, nil
 }
@@ -945,8 +996,9 @@ func (c *Client) UploadPersonImage(ctx context.Context, name string, data []byte
 }
 
 func (c *Client) uploadImagePath(ctx context.Context, endpoint string, data []byte) error {
-	encoded := base64.StdEncoding.EncodeToString(data)
-	req, err := c.newRequest(ctx, http.MethodPost, endpoint, nil, strings.NewReader(encoded))
+	// Emby's image endpoints expect the raw image bytes in the request body;
+	// sending anything else (for example base64 text) stores corrupt image data.
+	req, err := c.newRequest(ctx, http.MethodPost, endpoint, nil, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -1110,9 +1162,12 @@ func (c *Client) DownloadPath(ctx context.Context, endpoint string) ([]byte, str
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, "", fmt.Errorf("emby %s failed: HTTP %d %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageDownloadBytes+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if int64(len(data)) > maxImageDownloadBytes {
+		return nil, "", fmt.Errorf("emby %s response exceeds the %d byte image download limit", endpoint, maxImageDownloadBytes)
 	}
 	ext := extensionFromContentType(resp.Header.Get("Content-Type"))
 	return data, ext, nil

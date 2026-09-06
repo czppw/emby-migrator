@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -113,7 +115,23 @@ func (s *Server) applyMediaDatabaseJob(j *job.Job, exportPath, databasePath stri
 		ContainerName: containerName,
 	}
 	if !profile.AutoManageContainer {
-		j.Log("warn", "手动停服模式：跳过在线目标身份预检；写入前仅校验 library.db schema 和计划项目 ID/名称锚点，无法独立确认数据库所属 ServerID。")
+		planned, planErr := s.exporter.MediaDatabasePlanTarget(exportPath)
+		if planErr != nil {
+			j.Log("warn", "手动停服模式：无法独立确认数据库所属 ServerID，仅校验 library.db schema 和项目 ID/名称锚点；读取媒体技术信息计划失败：%v", planErr)
+			return result, planErr
+		}
+		plannedID := strings.TrimSpace(planned.ServerID)
+		profileID := strings.TrimSpace(profile.ServerID)
+		switch {
+		case plannedID == "":
+			j.Log("warn", "手动停服模式：计划未包含目标 ServerID；写入前仅校验 library.db schema 和计划项目 ID/名称锚点，无法独立确认数据库所属服务器。")
+		case profileID == "":
+			j.Log("warn", "手动停服模式：档案未记录目标 ServerID（保存档案时服务器不可达），请人工确认所选 library.db 属于计划目标 %q", plannedID)
+		case plannedID != profileID:
+			return result, fmt.Errorf("手动停服模式安全校验失败：计划目标 ServerID %q 与所选档案 ServerID %q 不一致，请确认选择了正确的目标服务器档案", plannedID, profileID)
+		default:
+			j.Log("info", "手动停服模式：计划目标 ServerID 与档案一致（%s），继续应用。", plannedID)
+		}
 		result.MediaDatabaseApplyResult, err = apply()
 		return result, err
 	}
@@ -205,7 +223,16 @@ func (s *Server) applyMediaDatabaseJob(j *job.Job, exportPath, databasePath stri
 	verification, verifyErr := s.exporter.VerifyMediaDatabasePlan(verifyCtx, exportPath, emby.Connection{BaseURL: profile.BaseURL, APIKey: profile.APIKey})
 	cancel()
 	if verifyErr != nil {
-		return result, fmt.Errorf("Emby 重启后媒体技术信息回读验证失败：%w", verifyErr)
+		backupPath := strings.TrimSpace(result.MediaDatabaseApplyResult.Result.BackupPath)
+		j.Log("warn", "Emby 重启后回读验证失败，正在从备份恢复数据库：%s", backupPath)
+		if restoreErr := s.restoreDatabaseFromBackup(j.Context(), containerName, databasePath, backupPath, &restartNeeded); restoreErr != nil {
+			return result, errors.Join(
+				fmt.Errorf("Emby 重启后媒体技术信息回读验证失败：%w", verifyErr),
+				fmt.Errorf("自动恢复数据库失败（可手工用备份 %s 恢复）：%w", backupPath, restoreErr))
+		}
+		restartNeeded = false
+		j.Log("info", "已从备份恢复数据库并重新启动目标 Emby 容器")
+		return result, fmt.Errorf("Emby 重启后媒体技术信息回读验证失败，已自动从备份恢复数据库并重启容器：%w", verifyErr)
 	}
 	result.Verification = &verification
 	j.Log("info", "Emby 重启回读验证完成：项目 %d，媒体流 %d，章节 %d", verification.Items, verification.Streams, verification.Chapters)
@@ -223,6 +250,93 @@ func (s *Server) startManagedContainer(ctx context.Context, containerName string
 		return err
 	}
 	return s.docker.WaitRunning(ctx, containerName)
+}
+
+// restoreDatabaseFromBackup stops the target container, replaces library.db
+// with the pre-apply backup, removes stale SQLite WAL sidecars and starts the
+// container again. restartNeeded is set once the container has actually been
+// stopped, so the caller's deferred restart covers failures in later steps.
+func (s *Server) restoreDatabaseFromBackup(ctx context.Context, containerName, databasePath, backupPath string, restartNeeded *bool) error {
+	backupPath = strings.TrimSpace(backupPath)
+	if backupPath == "" {
+		return fmt.Errorf("没有可用的数据库备份")
+	}
+	if info, err := os.Stat(backupPath); err != nil {
+		return fmt.Errorf("读取数据库备份失败：%w", err)
+	} else if !info.Mode().IsRegular() {
+		return fmt.Errorf("数据库备份不是常规文件：%s", backupPath)
+	}
+	if err := s.docker.Stop(ctx, containerName, containerStopTimeoutSeconds); err != nil {
+		return fmt.Errorf("停止目标 Emby 容器失败：%w", err)
+	}
+	*restartNeeded = true
+	stopCtx, cancel := context.WithTimeout(ctx, containerTransitionTimeout)
+	err := s.docker.WaitStopped(stopCtx, containerName)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("等待目标 Emby 容器停止失败：%w", err)
+	}
+	if err := restoreDatabaseFile(backupPath, databasePath); err != nil {
+		return fmt.Errorf("恢复数据库文件失败：%w", err)
+	}
+	startCtx, cancel := context.WithTimeout(ctx, containerTransitionTimeout)
+	err = s.docker.Start(startCtx, containerName)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("启动目标 Emby 容器失败：%w", err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, containerTransitionTimeout)
+	err = s.docker.WaitRunning(waitCtx, containerName)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("等待目标 Emby 容器运行失败：%w", err)
+	}
+	return nil
+}
+
+// restoreDatabaseFile copies backup over databasePath atomically and deletes
+// any stale SQLite WAL/shm sidecars, so the restored snapshot is exactly what
+// Emby reads on the next start.
+func restoreDatabaseFile(backupPath, databasePath string) error {
+	source, err := os.Open(backupPath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	info, err := os.Stat(databasePath)
+	if err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(databasePath), ".restore-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	cleanup := func() { _ = temp.Close(); _ = os.Remove(tempPath) }
+	if _, err := io.Copy(temp, source); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Chmod(info.Mode().Perm()); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := os.Rename(tempPath, databasePath); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Remove(databasePath + suffix)
+	}
+	return nil
 }
 
 func waitForEmbyReady(ctx context.Context, connection emby.Connection) error {

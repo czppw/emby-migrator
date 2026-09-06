@@ -1,9 +1,11 @@
 package emby
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -250,6 +252,45 @@ func TestItemsPaginatesAndRequestsCompleteMetadataFields(t *testing.T) {
 	}
 	if items[204].ImageTags["Primary"] != "tag-204" || len(items[204].BackdropImageTags) != 1 {
 		t.Fatalf("image metadata was not parsed: %#v", items[204])
+	}
+}
+
+func TestItemsPaginatesWhenServerOmitsTotalRecordCount(t *testing.T) {
+	var starts []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start, err := strconv.Atoi(r.URL.Query().Get("StartIndex"))
+		if err != nil {
+			http.Error(w, "missing StartIndex", http.StatusBadRequest)
+			return
+		}
+		starts = append(starts, start)
+		switch start {
+		case 0, 100:
+			// Two full pages with TotalRecordCount omitted entirely.
+			writeItemsPage(t, w, 0, makeTestItems(start, DefaultLimit))
+		case 200:
+			writeItemsPage(t, w, 0, makeTestItems(start, 7))
+		default:
+			http.Error(w, "unexpected StartIndex "+strconv.Itoa(start), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/emby", testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	items, err := client.Items(context.Background(), "lib-movies")
+	if err != nil {
+		t.Fatalf("Items returned error: %v", err)
+	}
+	if len(items) != 207 {
+		t.Fatalf("Items returned %d items, want 207 across three pages", len(items))
+	}
+	if !reflect.DeepEqual(starts, []int{0, 100, 200}) {
+		t.Fatalf("StartIndex sequence = %#v, want [0 100 200]", starts)
 	}
 }
 
@@ -526,6 +567,48 @@ func TestFallbackImagesUsesConfiguredImageTypesAndBackdropIndexes(t *testing.T) 
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("FallbackImages returned %#v, want %#v", got, want)
+	}
+}
+
+func TestUploadImageSendsRawBytesAsRequestBody(t *testing.T) {
+	payload := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8}
+	var body []byte
+	var contentType string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Emby-Token") != testAPIKey {
+			http.Error(w, "missing X-Emby-Token", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/emby/Items/item-1/Images/Primary" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		var err error
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		contentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/emby", testAPIKey)
+	if err != nil {
+		t.Fatalf("NewClient returned error: %v", err)
+	}
+	client.HTTPClient = server.Client()
+
+	if err := client.UploadImage(context.Background(), "item-1", "Primary", payload); err != nil {
+		t.Fatalf("UploadImage returned error: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("upload request body = %v, want raw image bytes %v", body, payload)
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		t.Fatalf("upload Content-Type = %q, want image/*", contentType)
 	}
 }
 
